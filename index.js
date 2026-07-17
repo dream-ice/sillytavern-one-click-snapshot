@@ -1954,6 +1954,7 @@ async function showSnapshotContents(snapshot) {
         root.append(section);
     }
     if (snapshot.scopes?.preset) {
+        const presetLabel = payload.preset?.presetName ?? '未选择预设';
         const manager = getPresetManager();
         const selectedPreset = manager?.getCompletionPresetByName?.(payload.preset?.presetName);
         const livePromptGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
@@ -1961,7 +1962,7 @@ async function showSnapshotContents(snapshot) {
         const nodes = [];
         const groups = new Map();
         const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设与启用条目');
+        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设与启用条目', presetLabel);
         const entriesBody = drawerBody(entriesDrawer);
         for (const entry of enabledEntries) {
             const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
