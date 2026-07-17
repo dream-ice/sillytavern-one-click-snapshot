@@ -1943,7 +1943,7 @@ async function showSnapshotContents(snapshot) {
         root.append($('<div class="ocs-version-value"><span>用户版本</span><strong></strong></div>').find('strong').text(`${name} · ${version}`).end());
     }
     if (snapshot.scopes?.worldInfo) {
-        const section = makeDrawer('ocs-content-section ocs-content-world', '世界书与启用条目');
+        const section = makeDrawer('ocs-content-section ocs-content-world', '世界书启用');
         const sectionBody = drawerBody(section);
         const books = payload.worldInfo?.books ?? [];
         const appendSource = (source, { collapsible = false } = {}) => {
@@ -1978,7 +1978,7 @@ async function showSnapshotContents(snapshot) {
         const nodes = [];
         const groups = new Map();
         const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设与启用条目', presetLabel);
+        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
         const entriesBody = drawerBody(entriesDrawer);
         for (const entry of enabledEntries) {
             const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
