@@ -25,6 +25,7 @@ import { power_user } from '../../../power-user.js';
 import { getConnectedPersonas, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallowScopedScripts, getCurrentPresetAPI, getCurrentPresetName, getScriptsByType, isPresetScriptsAllowed, isScopedScriptsAllowed, saveScriptsByType, SCRIPT_TYPES } from '../../regex/engine.js';
+import { DiffMatchPatch } from '../../../../lib.js';
 
 const EXTENSION_KEY = 'one_click_snapshot';
 const METADATA_KEY = 'one_click_snapshot';
@@ -1588,6 +1589,93 @@ function getVersionDescription(type, version) {
     return type === 'character' ? String(version.data?.description ?? '') : String(version.data?.descriptor?.description ?? '');
 }
 
+function appendDiffFragment(container, text, className = '') {
+    if (!text) return;
+    container.append($('<span></span>').toggleClass(className, Boolean(className)).text(text));
+}
+
+async function openVersionComparison(type) {
+    const context = versionContext(type);
+    const versions = [...context.list].sort((a, b) => b.updatedAt - a.updatedAt);
+    if (versions.length < 2) {
+        toastr.warning(`至少需要两个${context.title}才能对比。`, '一键快照');
+        return;
+    }
+
+    const root = $('<div class="ocs-version-diff-popup"></div>');
+    root.append($('<header><span class="ocs-kicker">VERSION DIFF</span><h3></h3><p></p></header>')
+        .find('h3').text(`对比${context.title}`).end()
+        .find('p').text('只读对比版本描述：红色为来源中删除的内容，青色为目标中新加的内容。').end());
+    const selectors = $('<div class="ocs-version-diff-selectors"></div>');
+    const sourceSelect = $('<select class="text_pole"></select>');
+    const targetSelect = $('<select class="text_pole"></select>');
+    for (const version of versions) {
+        sourceSelect.append($('<option></option>').val(version.id).text(version.name));
+        targetSelect.append($('<option></option>').val(version.id).text(version.name));
+    }
+    sourceSelect.val(versions[1].id);
+    targetSelect.val(context.current?.id && context.list.some(version => version.id === context.current.id) ? context.current.id : versions[0].id);
+    if (sourceSelect.val() === targetSelect.val()) sourceSelect.val(versions[0].id === targetSelect.val() ? versions[1].id : versions[0].id);
+    selectors.append($('<label></label>').append('<span>来源</span>', sourceSelect), $('<label></label>').append('<span>目标</span>', targetSelect));
+    root.append(selectors);
+
+    const summary = $('<p class="ocs-version-diff-summary"></p>');
+    const panes = $('<div class="ocs-version-diff-panes"></div>');
+    const sourcePane = $('<section class="ocs-version-diff-pane ocs-version-diff-source"></section>');
+    const targetPane = $('<section class="ocs-version-diff-pane ocs-version-diff-target"></section>');
+    const sourceHeading = $('<header><span>来源</span><strong></strong></header>');
+    const targetHeading = $('<header><span>目标</span><strong></strong></header>');
+    const sourceText = $('<div class="ocs-version-diff-text"></div>');
+    const targetText = $('<div class="ocs-version-diff-text"></div>');
+    sourcePane.append(sourceHeading, sourceText);
+    targetPane.append(targetHeading, targetText);
+    panes.append(sourcePane, targetPane);
+    root.append(summary, panes);
+
+    const render = () => {
+        const source = context.list.find(version => version.id === sourceSelect.val());
+        const target = context.list.find(version => version.id === targetSelect.val());
+        if (!source || !target) return;
+        sourceHeading.find('strong').text(source.name);
+        targetHeading.find('strong').text(target.name);
+        sourceText.empty();
+        targetText.empty();
+        const sourceValue = getVersionDescription(type, source);
+        const targetValue = getVersionDescription(type, target);
+        const differ = new DiffMatchPatch();
+        const diffs = differ.diff_main(sourceValue, targetValue);
+        differ.diff_cleanupSemantic(diffs);
+        let removed = 0;
+        let added = 0;
+        for (const [operation, text] of diffs) {
+            if (operation === -1) {
+                appendDiffFragment(sourceText, text, 'ocs-version-diff-removed');
+                removed += text.length;
+            } else if (operation === 1) {
+                appendDiffFragment(targetText, text, 'ocs-version-diff-added');
+                added += text.length;
+            } else {
+                appendDiffFragment(sourceText, text);
+                appendDiffFragment(targetText, text);
+            }
+        }
+        if (!sourceValue) sourceText.append('<span class="ocs-version-diff-empty">（空白描述）</span>');
+        if (!targetValue) targetText.append('<span class="ocs-version-diff-empty">（空白描述）</span>');
+        summary.text(added || removed ? `目标新增 ${added} 字，来源删减 ${removed} 字。` : '两个版本的描述完全一致。');
+    };
+    let syncing = false;
+    sourceText.add(targetText).on('scroll', event => {
+        if (syncing) return;
+        syncing = true;
+        const other = event.currentTarget === sourceText.get(0) ? targetText : sourceText;
+        other.scrollTop($(event.currentTarget).scrollTop());
+        syncing = false;
+    });
+    sourceSelect.add(targetSelect).on('change', render);
+    render();
+    await showOcsPopup(root);
+}
+
 async function openVersionDescriptionEditor(type, version) {
     const label = type === 'character' ? '角色描述' : '用户描述';
     const root = $('<div class="ocs-version-editor-popup"></div>');
@@ -1630,7 +1718,7 @@ async function openVersionManager(type) {
     const context = versionContext(type);
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
-    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
+    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
         const enabled = settings().autoSyncVersions === true;
@@ -1678,6 +1766,7 @@ async function openVersionManager(type) {
     };
     root.find('.ocs-version-blank').on('click', async () => { await createBlankVersion(type); render(); });
     root.find('.ocs-version-copy').on('click', async () => { await saveCurrentAsVersion(type); render(); });
+    root.find('.ocs-version-compare').on('click', () => openVersionComparison(type));
     const nativeSelector = type === 'character' ? '#description_textarea, #personality_textarea, #scenario_pole, #firstmessage_textarea, #mes_example_textarea' : '#persona_description';
     $(nativeSelector).off('input.oneClickSnapshotVersion').on('input.oneClickSnapshotVersion', render);
     const autoSyncRenderHandler = (_, syncedType) => {

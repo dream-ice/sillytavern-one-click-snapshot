@@ -168,6 +168,25 @@
 .ocs-version-edit-label { display: grid; gap: 6px; font-size: .9em; }
 .ocs-version-edit-label textarea { box-sizing: border-box; width: 100%; min-height: min(54dvh, 420px); resize: vertical; font: inherit; line-height: 1.45; }
 .ocs-version-editor-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.ocs-version-diff-popup { width: min(1080px, 100%); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
+.ocs-version-diff-popup header { margin: 0 0 11px; padding-bottom: 9px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
+.ocs-version-diff-popup h3 { margin: 3px 0 0; font-size: 1.18em; }
+.ocs-version-diff-popup > header p { margin: 5px 0 0; opacity: .72; font-size: .84em; }
+.ocs-version-diff-selectors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0 0 9px; }
+.ocs-version-diff-selectors label { display: grid; gap: 5px; min-width: 0; font-size: .84em; }
+.ocs-version-diff-selectors select { width: 100%; min-width: 0; margin: 0; }
+.ocs-version-diff-summary { margin: 0 0 8px; opacity: .72; font-size: .83em; }
+.ocs-version-diff-panes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.ocs-version-diff-pane { min-width: 0; overflow: hidden; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 7px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 14%, transparent); }
+.ocs-version-diff-pane > header { display: flex; align-items: baseline; gap: 8px; margin: 0; padding: 8px 10px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
+.ocs-version-diff-pane > header span { flex: 0 0 auto; color: var(--SmartThemeQuoteColor, #9cc); font-size: .76em; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; }
+.ocs-version-diff-pane > header strong { min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
+.ocs-version-diff-text { min-height: min(44dvh, 440px); max-height: 58dvh; padding: 10px; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .88em; line-height: 1.58; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ocs-version-diff-added,
+.ocs-version-diff-removed { border-radius: 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.ocs-version-diff-added { padding: 1px 0; background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 34%, transparent); }
+.ocs-version-diff-removed { padding: 1px 0; background: color-mix(in srgb, #c66 40%, transparent); }
+.ocs-version-diff-empty { opacity: .58; font-style: italic; }
 .ocs-native-version-hint { display: inline-block; margin: 4px 0 0; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; opacity: .9; }
 
 @media (max-width: 700px) {
@@ -191,6 +210,10 @@
     .ocs-popup,
     .ocs-contents-popup,
     .ocs-version-popup { width: 100%; max-width: 100%; }
+    .ocs-version-diff-popup { width: 100%; max-width: 100%; }
+    .ocs-version-diff-selectors,
+    .ocs-version-diff-panes { grid-template-columns: 1fr; }
+    .ocs-version-diff-text { min-height: min(28dvh, 300px); max-height: 38dvh; }
 
     .ocs-workspace,
     .ocs-snapshot-cards { grid-template-columns: 1fr; }
