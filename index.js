@@ -1772,8 +1772,7 @@ async function openVersionManager(type) {
                     else expandedVersionIds.delete(version.id);
                 });
                 const summary = $('<summary></summary>');
-                const label = fresh.current?.id === version.id ? `${version.name}（当前应用）` : version.name;
-                summary.append($('<strong></strong>').text(label), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
+                summary.append($('<strong></strong>').text(version.name), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
                 card.append(summary, versionPreview(type, version));
                 const actions = $('<div class="ocs-card-actions"></div>');
                 if (fresh.current?.id === version.id && !versionDataEquals(type, version.data, captureVersionFormState(type))) {
@@ -2056,13 +2055,10 @@ function renderSnapshotList(root) {
             const greetingBindings = snapshotGreetingBindings(snapshot.id);
             const currentCharacterDefault = currentCharacterBinding()?.snapshotId === snapshot.id;
             const currentGreetingBindings = greetingBindings.filter(item => item.avatar === currentCharacter()?.avatar);
-            const isCurrentApplied = snapshot.id === activeSnapshotId;
             const card = $('<article class="ocs-snapshot-card"></article>')
-                .toggleClass('ocs-bound', isBound || characterBindings.length > 0)
-                .toggleClass('ocs-current-snapshot', isCurrentApplied);
+                .toggleClass('ocs-bound', isBound || characterBindings.length > 0);
             const cardHeader = $('<div class="ocs-card-header"></div>');
             cardHeader.append($('<h4></h4>').text(snapshot.name));
-            if (isCurrentApplied) cardHeader.append($('<span class="ocs-current-indicator"></span>').text('当前应用'));
             card.append(cardHeader);
             card.append($('<time></time>').text(`更新于 ${new Date(snapshot.updatedAt).toLocaleString()}`));
             card.append(scopeBadges(snapshot));
