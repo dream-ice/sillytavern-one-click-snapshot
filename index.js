@@ -792,6 +792,16 @@ function getSnapshot(snapshotId) {
     return settings().snapshots.find(snapshot => snapshot.id === snapshotId) ?? null;
 }
 
+function currentAppliedSnapshotId() {
+    const chatState = binding();
+    // A manually applied snapshot is a chat state too, even when it is not
+    // configured as this chat's automatic binding. Keep that state in the
+    // chat metadata so reopening the library still puts it first.
+    if (chatState.lastAppliedSnapshotId && getSnapshot(chatState.lastAppliedSnapshotId)) return chatState.lastAppliedSnapshotId;
+    if (chatState.enabled !== false && chatState.snapshotId && getSnapshot(chatState.snapshotId)) return chatState.snapshotId;
+    return null;
+}
+
 function snapshotRequirements(snapshot) {
     const payload = snapshot?.payload ?? {};
     const sources = new Set((payload.worldInfo?.books ?? []).flatMap(book => book.sources ?? []));
@@ -915,6 +925,7 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         if (snapshot.scopes?.worldInfo) await applyWorldInfo(payload.worldInfo, { excludedSources });
         if (snapshot.scopes?.preset) await applyPreset(payload.preset);
         if (snapshot.scopes?.regex) await applyRegex(payload.regex);
+        binding().lastAppliedSnapshotId = snapshot.id;
         saveSettingsDebounced();
         saveMetadataDebounced();
         if (!silent) toastr.success(`${incompatible.length ? '已应用兼容内容' : '已应用'}：${snapshot.name}`, '一键快照');
@@ -1739,8 +1750,12 @@ async function openVersionManager(type) {
             expansionInitialized = true;
         }
         if (!fresh.list.length) list.append('<div class="ocs-empty">还没有版本。可新建空白版本，或把当前原生描述另存为版本。</div>');
+        const orderedVersions = [...fresh.list].sort((a, b) => {
+            const currentOrder = Number(b.id === fresh.current?.id) - Number(a.id === fresh.current?.id);
+            return currentOrder || b.updatedAt - a.updatedAt;
+        });
         const grouped = new Map();
-        for (const version of [...fresh.list].sort((a, b) => b.updatedAt - a.updatedAt)) {
+        for (const version of orderedVersions) {
             const group = version.group || '未分组';
             if (!grouped.has(group)) grouped.set(group, []);
             grouped.get(group).push(version);
@@ -1757,7 +1772,8 @@ async function openVersionManager(type) {
                     else expandedVersionIds.delete(version.id);
                 });
                 const summary = $('<summary></summary>');
-                summary.append($('<strong></strong>').text(version.name), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
+                const label = fresh.current?.id === version.id ? `${version.name}（当前应用）` : version.name;
+                summary.append($('<strong></strong>').text(label), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
                 card.append(summary, versionPreview(type, version));
                 const actions = $('<div class="ocs-card-actions"></div>');
                 if (fresh.current?.id === version.id && !versionDataEquals(type, version.data, captureVersionFormState(type))) {
@@ -1774,7 +1790,7 @@ async function openVersionManager(type) {
             return fragment;
         };
         const hasGroups = versionGroups(type).length > 0 || fresh.list.some(version => version.group);
-        if (!hasGroups) list.append(renderCards([...fresh.list].sort((a, b) => b.updatedAt - a.updatedAt)));
+        if (!hasGroups) list.append(renderCards(orderedVersions));
         else for (const [group, versions] of grouped) list.append($('<details class="ocs-snapshot-group" open></details>').append($('<summary></summary>').text(`${group} · ${versions.length}`), renderCards(versions)));
     };
     root.find('.ocs-version-blank').on('click', async () => { await createBlankVersion(type); render(); });
@@ -2018,9 +2034,13 @@ function renderSnapshotList(root) {
     const expandedGroups = new Set(root.find('.ocs-snapshot-group[open]').toArray().map(element => element.dataset.ocsGroup));
     const list = root.find('.ocs-snapshot-list').empty();
     const filter = String(root.find('.ocs-library-filter').val() ?? '__all__');
+    const activeSnapshotId = currentAppliedSnapshotId();
     const snapshots = [...settings().snapshots]
         .filter(snapshot => filter === '__all__' || (snapshot.group ?? '') === filter)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+        .sort((a, b) => {
+            const currentOrder = Number(b.id === activeSnapshotId) - Number(a.id === activeSnapshotId);
+            return currentOrder || b.updatedAt - a.updatedAt;
+        });
     if (!snapshots.length) return list.append('<div class="ocs-empty">这个分组还没有快照。</div>');
     const grouped = new Map();
     for (const snapshot of snapshots) {
@@ -2036,9 +2056,13 @@ function renderSnapshotList(root) {
             const greetingBindings = snapshotGreetingBindings(snapshot.id);
             const currentCharacterDefault = currentCharacterBinding()?.snapshotId === snapshot.id;
             const currentGreetingBindings = greetingBindings.filter(item => item.avatar === currentCharacter()?.avatar);
-            const card = $('<article class="ocs-snapshot-card"></article>').toggleClass('ocs-bound', isBound || characterBindings.length > 0);
+            const isCurrentApplied = snapshot.id === activeSnapshotId;
+            const card = $('<article class="ocs-snapshot-card"></article>')
+                .toggleClass('ocs-bound', isBound || characterBindings.length > 0)
+                .toggleClass('ocs-current-snapshot', isCurrentApplied);
             const cardHeader = $('<div class="ocs-card-header"></div>');
             cardHeader.append($('<h4></h4>').text(snapshot.name));
+            if (isCurrentApplied) cardHeader.append($('<span class="ocs-current-indicator"></span>').text('当前应用'));
             card.append(cardHeader);
             card.append($('<time></time>').text(`更新于 ${new Date(snapshot.updatedAt).toLocaleString()}`));
             card.append(scopeBadges(snapshot));
@@ -2057,7 +2081,9 @@ function renderSnapshotList(root) {
                 card.append($('<p class="ocs-bound-chats"></p>').text(`开场白：${labels.join('、')}`));
             }
             const actions = $('<div class="ocs-card-actions"></div>');
-            actions.append($('<button class="ocs-button">应用</button>').on('click', () => applySnapshot(snapshot)));
+            actions.append($('<button class="ocs-button">应用</button>').on('click', async () => {
+                if (await applySnapshot(snapshot)) renderSnapshotList(root);
+            }));
             actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot)));
             actions.append($('<button class="ocs-button">更新</button>').on('click', async () => { await updateSnapshot(snapshot); renderSnapshotList(root); }));
             actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameSnapshot(snapshot); renderSnapshotList(root); }));
@@ -2096,6 +2122,7 @@ function renderSnapshotList(root) {
                 if (!await Popup.show.confirm('删除快照', `删除“${snapshot.name}”？角色、世界书和预设本身不会删除。`)) return;
                 settings().snapshots = settings().snapshots.filter(item => item.id !== snapshot.id);
                 if (binding().snapshotId === snapshot.id) binding().snapshotId = null;
+                if (binding().lastAppliedSnapshotId === snapshot.id) binding().lastAppliedSnapshotId = null;
                 delete settings().snapshotBindings[snapshot.id];
                 for (const [avatar, record] of Object.entries(settings().characterBindings)) {
                     if (record?.snapshotId === snapshot.id) delete settings().characterBindings[avatar];
@@ -2123,7 +2150,7 @@ function renderSnapshotList(root) {
     }
     for (const [group, items] of grouped) {
         const section = $('<details class="ocs-snapshot-group"></details>');
-        section.attr('data-ocs-group', group).prop('open', expandedGroups.has(group));
+        section.attr('data-ocs-group', group).prop('open', expandedGroups.has(group) || items.some(snapshot => snapshot.id === activeSnapshotId));
         section.append($('<summary></summary>').text(`${group} · ${items.length}`));
         section.append(renderCards(items));
         list.append(section);
