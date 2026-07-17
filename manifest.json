@@ -1,0 +1,10 @@
+{
+  "display_name": "一键快照",
+  "version": "0.3.49",
+  "js": "index.js",
+  "css": "style.css",
+  "author": "icedream",
+  "auto_update": false,
+  "loading_order": 200,
+  "minimum_client_version": "1.12.0"
+}
