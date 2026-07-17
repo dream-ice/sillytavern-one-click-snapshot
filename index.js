@@ -1594,7 +1594,7 @@ async function openVersionDescriptionEditor(type, version) {
     root.append($('<header><span class="ocs-kicker">VERSION EDITOR</span><h3></h3></header>').find('h3').text(version.name).end());
     root.append($('<label class="ocs-version-edit-label"></label>').text(label).append($('<textarea class="text_pole" rows="12"></textarea>').val(getVersionDescription(type, version))));
     const actions = $('<div class="ocs-version-editor-actions"></div>');
-    actions.append($('<button class="ocs-button ocs-primary">保存并应用</button>').on('click', async () => {
+    actions.append($('<button class="ocs-button ocs-primary">保存</button>').on('click', async () => {
         const data = deepClone(version.data);
         const value = String(root.find('textarea').val() ?? '');
         if (type === 'character') data.description = value;
@@ -1602,10 +1602,7 @@ async function openVersionDescriptionEditor(type, version) {
         version.data = data;
         version.updatedAt = Date.now();
         saveSettingsDebounced();
-        await versionContext(type).apply(version.data, version.id);
-        saveSettingsDebounced();
-        refreshVersionIndicators();
-        toastr.success(`已保存并应用版本：${version.name}`, '一键快照');
+        toastr.success(`已保存版本：${version.name}`, '一键快照');
     }));
     root.append(actions);
     await showOcsPopup(root);
@@ -1623,7 +1620,7 @@ async function openVersionManager(type) {
     const context = versionContext(type);
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
-    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看描述；编辑保存后会立即应用到原生描述框。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
+    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存只更新版本本身，需点击“应用”才会切换到原生描述框。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
         const enabled = settings().autoSyncVersions === true;
