@@ -1602,7 +1602,17 @@ async function openVersionDescriptionEditor(type, version) {
         version.data = data;
         version.updatedAt = Date.now();
         saveSettingsDebounced();
-        toastr.success(`已保存版本：${version.name}`, '一键快照');
+        const context = versionContext(type);
+        if (context.current?.id === version.id) {
+            // The user is editing the version already active in SillyTavern,
+            // so keep its native editor in sync. This is not a version switch;
+            // preserve the live greeting catalog while writing the update.
+            await context.apply(version.data, version.id, { preserveGreetingCatalog: true });
+            saveSettingsDebounced();
+            toastr.success(`已保存并同步当前版本：${version.name}`, '一键快照');
+        } else {
+            toastr.success(`已保存版本：${version.name}`, '一键快照');
+        }
     }));
     root.append(actions);
     await showOcsPopup(root);
@@ -1620,7 +1630,7 @@ async function openVersionManager(type) {
     const context = versionContext(type);
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
-    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存只更新版本本身，需点击“应用”才会切换到原生描述框。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
+    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
         const enabled = settings().autoSyncVersions === true;
