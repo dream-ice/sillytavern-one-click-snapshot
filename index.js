@@ -1719,6 +1719,8 @@ async function openVersionManager(type) {
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
     const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
+    const expandedVersionIds = new Set();
+    let expansionInitialized = false;
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
         const enabled = settings().autoSyncVersions === true;
@@ -1732,6 +1734,10 @@ async function openVersionManager(type) {
     const render = () => {
         const list = root.find('.ocs-version-list').empty();
         const fresh = versionContext(type);
+        if (!expansionInitialized) {
+            if (fresh.current?.id) expandedVersionIds.add(fresh.current.id);
+            expansionInitialized = true;
+        }
         if (!fresh.list.length) list.append('<div class="ocs-empty">还没有版本。可新建空白版本，或把当前原生描述另存为版本。</div>');
         const grouped = new Map();
         for (const version of [...fresh.list].sort((a, b) => b.updatedAt - a.updatedAt)) {
@@ -1742,7 +1748,14 @@ async function openVersionManager(type) {
         const renderCards = versions => {
             const fragment = $('<div class="ocs-version-cards"></div>');
             for (const version of versions) {
-                const card = $('<details class="ocs-version-card"></details>').toggleClass('ocs-active-version', fresh.current?.id === version.id).prop('open', fresh.current?.id === version.id);
+                const card = $('<details class="ocs-version-card"></details>')
+                    .attr('data-ocs-version-id', version.id)
+                    .toggleClass('ocs-active-version', fresh.current?.id === version.id)
+                    .prop('open', expandedVersionIds.has(version.id));
+                card.on('toggle', () => {
+                    if (card.prop('open')) expandedVersionIds.add(version.id);
+                    else expandedVersionIds.delete(version.id);
+                });
                 const summary = $('<summary></summary>');
                 summary.append($('<strong></strong>').text(version.name), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
                 card.append(summary, versionPreview(type, version));
@@ -1941,7 +1954,6 @@ async function showSnapshotContents(snapshot) {
         root.append(section);
     }
     if (snapshot.scopes?.preset) {
-        const presetLabel = `${payload.preset?.api ?? ''} · ${payload.preset?.presetName ?? '未选择预设'}`;
         const manager = getPresetManager();
         const selectedPreset = manager?.getCompletionPresetByName?.(payload.preset?.presetName);
         const livePromptGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
@@ -1949,7 +1961,7 @@ async function showSnapshotContents(snapshot) {
         const nodes = [];
         const groups = new Map();
         const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设与启用条目', presetLabel);
+        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设与启用条目');
         const entriesBody = drawerBody(entriesDrawer);
         for (const entry of enabledEntries) {
             const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
