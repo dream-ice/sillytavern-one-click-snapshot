@@ -6,12 +6,14 @@ import {
     characters,
     chat_metadata,
     createOrEditCharacter,
+    displayOnlineStatus,
     eventSource,
     event_types,
     getCurrentChatDetails,
     getCurrentChatId,
     getPastCharacterChats,
     main_api,
+    reloadChatMutex,
     reloadCurrentChat,
     saveSettingsDebounced,
     select_selected_character,
@@ -22,6 +24,7 @@ import { getWorldInfoSettings, loadWorldInfo, onWorldInfoChange, saveWorldInfo, 
 import { getCharaFilename } from '../../../utils.js';
 import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
+import { getChatCompletionModel, selected_proxy, settingsToUpdate } from '../../../openai.js';
 import { getConnectedPersonas, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallowScopedScripts, getCurrentPresetAPI, getCurrentPresetName, getScriptsByType, isPresetScriptsAllowed, isScopedScriptsAllowed, saveScriptsByType, SCRIPT_TYPES } from '../../regex/engine.js';
@@ -37,10 +40,55 @@ let qrShortcutRefreshQueued = false;
 let greetingSnapshotPending = null;
 let greetingGenerationStopped = false;
 let greetingDeferredCharacterDefaultChatId = null;
+let themeOptionObserver = null;
+let observedThemeSelect = null;
+const observedThemeOptionNames = new WeakMap();
 
 const deepClone = value => value === undefined ? undefined : structuredClone(value);
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `ocs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const DEFAULT_CAPTURE_SCOPES = { character: true, persona: true, worldInfo: true, preset: true, regex: true, worldSources: { global: true, characterMain: true, characterExtra: true, user: true, chat: true }, regexSources: { global: true, scoped: true, preset: true } };
+const DEFAULT_CAPTURE_SCOPES = { character: true, persona: true, theme: true, worldInfo: true, preset: true, api: true, regex: true, worldSources: { global: true, characterMain: true, characterExtra: true, user: true, chat: true }, regexSources: { global: true, scoped: true, preset: true } };
+const THEME_MANAGER_EXTENSION_KEY = 'theme-manager';
+const THEME_MANAGER_CHARACTER_BINDINGS_KEY = 'themeManager_characterThemeBindings';
+const PRESET_PARAMETER_KEYS = new Set([
+    'temperature', 'frequency_penalty', 'presence_penalty', 'top_p', 'top_k', 'top_a', 'min_p', 'repetition_penalty',
+    'openai_max_context', 'openai_max_tokens', 'reasoning_effort', 'verbosity', 'seed', 'n',
+]);
+const PRESET_PARAMETER_LABELS = {
+    temperature: '温度',
+    frequency_penalty: '频率惩罚',
+    presence_penalty: '存在惩罚',
+    top_p: 'Top P',
+    top_k: 'Top K',
+    top_a: 'Top A',
+    min_p: 'Min P',
+    repetition_penalty: '重复惩罚',
+    openai_max_context: '上下文长度',
+    openai_max_tokens: '最大回复长度',
+    reasoning_effort: '推理强度',
+    verbosity: '输出详细度',
+    seed: '随机种子',
+    n: '候选回复数',
+};
+const API_TEMPLATE_TYPES = ['context', 'instruct', 'sysprompt', 'reasoning'];
+const API_MAIN_LABELS = {
+    openai: '聊天补全',
+};
+// Connection endpoints and all credentials deliberately stay out of a
+// snapshot. These keys only describe an already-configured provider, model,
+// or public runtime toggle.
+const OPENAI_API_SETTING_KEYS = new Set([
+    'chat_completion_source',
+    'openai_model', 'claude_model', 'openrouter_model', 'ai21_model', 'mistralai_model', 'cohere_model', 'perplexity_model',
+    'groq_model', 'chutes_model', 'siliconflow_model', 'minimax_model', 'electronhub_model', 'nanogpt_model', 'deepseek_model',
+    'aimlapi_model', 'xai_model', 'pollinations_model', 'moonshot_model', 'fireworks_model', 'cometapi_model', 'custom_model',
+    'google_model', 'vertexai_model', 'zai_model', 'workers_ai_model', 'azure_openai_model',
+    'openrouter_use_fallback', 'openrouter_providers', 'openrouter_quantizations', 'openrouter_allow_fallbacks', 'openrouter_middleout',
+    'nanogpt_provider', 'nanogpt_payg_override',
+    'custom_prompt_post_processing', 'assistant_prefill', 'assistant_impersonation', 'use_sysprompt', 'squash_system_messages',
+    'continue_prefill', 'continue_postfix', 'function_calling', 'tool_call_recurse_limit', 'show_thoughts', 'tool_reasoning_mode',
+    'reasoning_effort', 'verbosity', 'enable_web_search', 'request_images', 'request_image_aspect_ratio', 'request_image_resolution',
+]);
+const OPENAI_API_MODEL_KEYS = new Set([...OPENAI_API_SETTING_KEYS].filter(key => key.endsWith('_model')));
 
 function settings() {
     extension_settings[EXTENSION_KEY] ??= { schemaVersion: 7, snapshots: [], snapshotGroups: [], snapshotBindings: {}, characterBindings: {}, greetingBindings: {}, characterVersions: {}, personaVersions: {}, characterVersionGroups: {}, personaVersionGroups: {}, activeCharacterVersions: {}, activePersonaVersions: {}, autoSyncVersions: false, qrShortcutEnabled: true, lastCaptureScopes: deepClone(DEFAULT_CAPTURE_SCOPES) };
@@ -59,7 +107,7 @@ function settings() {
     value.activePersonaVersions ??= {};
     value.autoSyncVersions ??= false;
     value.lastCaptureScopes ??= deepClone(DEFAULT_CAPTURE_SCOPES);
-    for (const key of ['character', 'persona', 'worldInfo', 'preset', 'regex']) value.lastCaptureScopes[key] ??= DEFAULT_CAPTURE_SCOPES[key];
+    for (const key of ['character', 'persona', 'theme', 'worldInfo', 'preset', 'api', 'regex']) value.lastCaptureScopes[key] ??= DEFAULT_CAPTURE_SCOPES[key];
     value.lastCaptureScopes.worldSources ??= deepClone(DEFAULT_CAPTURE_SCOPES.worldSources);
     for (const source of Object.keys(DEFAULT_CAPTURE_SCOPES.worldSources)) value.lastCaptureScopes.worldSources[source] ??= DEFAULT_CAPTURE_SCOPES.worldSources[source];
     value.lastCaptureScopes.regexSources ??= deepClone(DEFAULT_CAPTURE_SCOPES.regexSources);
@@ -118,9 +166,23 @@ function refreshVersionIndicators() {
     }
 }
 
+function refreshConnectionStatusDisplay() {
+    // Some UI layers rebuild parts of the API panel after SETTINGS_UPDATED and
+    // leave its initial “no connection” text behind while the core status is
+    // still connected. Replaying the core display is visual-only: it neither
+    // changes a connection nor starts a status check.
+    setTimeout(() => displayOnlineStatus(), 0);
+}
+
 function captureCharacter() {
     const character = currentCharacter();
     if (!character) return null;
+    const data = deepClone(character.data ?? {});
+    // Scoped regex scripts belong to the character card, but they are their
+    // own native resource rather than role-version content. Capturing the
+    // whole data object here used to make an old character version silently
+    // resurrect deleted scripts (or discard newly imported ones).
+    if (data.extensions) delete data.extensions.regex_scripts;
     return {
         avatar: character.avatar,
         name: character.name,
@@ -130,7 +192,7 @@ function captureCharacter() {
         first_mes: character.first_mes ?? '',
         mes_example: character.mes_example ?? '',
         talkativeness: character.talkativeness,
-        data: deepClone(character.data ?? {}),
+        data,
     };
 }
 
@@ -432,7 +494,342 @@ function capturePreset() {
         // applying it later uses the preset's current text and only restores
         // the enabled state recorded here.
         promptEntries,
+        // Chat-completion presets serve Gemini, Claude and other compatible
+        // backends. Store their generation controls separately from prompt
+        // content, so a snapshot can restore e.g. a Gemini temperature of
+        // 0.85 without overwriting the preset itself.
+        parameters: capturePresetParameters(),
     };
+}
+
+function capturePresetParameters() {
+    if (main_api !== 'openai') return null;
+    const settings = SillyTavern.getContext().chatCompletionSettings;
+    if (!settings) return null;
+    const parameters = {};
+    for (const key of PRESET_PARAMETER_KEYS) {
+        const setting = settingsToUpdate[key]?.[1];
+        if (setting && Object.hasOwn(settings, setting)) parameters[key] = deepClone(settings[setting]);
+    }
+    return parameters;
+}
+
+function presetParametersEqual(first, second) {
+    return JSON.stringify(first) === JSON.stringify(second);
+}
+
+function applyPresetParameters(parameters) {
+    if (main_api !== 'openai' || !parameters || typeof parameters !== 'object') return false;
+    const settings = SillyTavern.getContext().chatCompletionSettings;
+    if (!settings) return false;
+    let changed = false;
+    for (const [key, value] of Object.entries(parameters)) {
+        if (!PRESET_PARAMETER_KEYS.has(key)) continue;
+        const [selector, setting, isCheckbox] = settingsToUpdate[key] ?? [];
+        if (!setting || presetParametersEqual(settings[setting], value)) continue;
+        settings[setting] = deepClone(value);
+        const control = $(selector);
+        if (control.length) {
+            // Treat these as a native preset application. In particular,
+            // max-context settings use this marker to avoid forcing a
+            // chat-completion source reconnect for a parameter-only update.
+            if (isCheckbox) control.prop('checked', !!value).trigger('input', { source: 'preset' });
+            else control.val(value).trigger('input', { source: 'preset' });
+        }
+        changed = true;
+    }
+    if (changed) saveSettingsDebounced();
+    return changed;
+}
+
+function presetParameterLines(parameters) {
+    if (!parameters || typeof parameters !== 'object') return [];
+    return [...PRESET_PARAMETER_KEYS]
+        .filter(key => Object.hasOwn(parameters, key))
+        .map(key => `${PRESET_PARAMETER_LABELS[key] ?? key}：${parameters[key] === null || parameters[key] === '' ? '未设置' : String(parameters[key])}`);
+}
+
+function capturePresetReference(apiId) {
+    const manager = getPresetManager(apiId);
+    if (!manager) return null;
+    return {
+        name: manager.getSelectedPresetName?.() ?? '',
+        value: manager.getSelectedPreset?.() ?? null,
+    };
+}
+
+function captureApiState() {
+    const state = {
+        // This scope intentionally represents SillyTavern's Chat Completion
+        // connection only. Generation presets remain the separate “预设”
+        // snapshot scope, so their prompt entries and parameters never get
+        // duplicated or unexpectedly reapplied here.
+        mainApi: 'openai',
+        templates: Object.fromEntries(API_TEMPLATE_TYPES.map(type => [type, capturePresetReference(type)])),
+    };
+    const settings = SillyTavern.getContext().chatCompletionSettings;
+    const values = {};
+    for (const key of OPENAI_API_SETTING_KEYS) {
+        const setting = settingsToUpdate[key]?.[1];
+        if (setting && Object.hasOwn(settings, setting)) values[key] = deepClone(settings[setting]);
+    }
+    state.chatCompletion = {
+        values,
+        model: getChatCompletionModel(settings) ?? '',
+        promptPostProcessingLabel: String($('#custom_prompt_post_processing option:selected').text() ?? '').trim(),
+        // This is only the user-facing proxy preset name. Its URL and
+        // password continue to live exclusively in SillyTavern's own proxy
+        // preset store and are never copied into a snapshot.
+        proxyPreset: String($('#openai_proxy_preset').val() ?? selected_proxy?.name ?? 'None'),
+    };
+    return state;
+}
+
+async function selectPresetReference(apiId, reference) {
+    if (!reference?.name) return false;
+    const manager = getPresetManager(apiId);
+    if (!manager) return false;
+    const value = manager.findPreset(reference.name);
+    if (value === undefined || value === null || String(manager.getSelectedPreset()) === String(value)) return false;
+    const loaded = apiId === 'openai'
+        ? new Promise(resolve => eventSource.once(event_types.OAI_PRESET_CHANGED_AFTER, resolve))
+        : null;
+    manager.selectPreset(value);
+    if (loaded) await loaded;
+    return true;
+}
+
+function applyOpenAIConnectionState(values) {
+    if (!values || typeof values !== 'object') return false;
+    const settings = SillyTavern.getContext().chatCompletionSettings;
+    if (!settings) return false;
+    let changed = false;
+    const source = values.chat_completion_source;
+    if (source && settings.chat_completion_source !== source) {
+        const sourceSelect = $('#chat_completion_source');
+        if (sourceSelect.find(`option[value="${CSS.escape(String(source))}"]`).length) {
+            sourceSelect.val(source).trigger('change');
+            changed = true;
+        } else {
+            settings.chat_completion_source = source;
+            changed = true;
+        }
+    }
+    for (const [key, value] of Object.entries(values)) {
+        if (key === 'chat_completion_source' || !OPENAI_API_SETTING_KEYS.has(key)) continue;
+        const [selector, setting, isCheckbox] = settingsToUpdate[key] ?? [];
+        if (!setting || presetParametersEqual(settings[setting], value)) continue;
+        settings[setting] = deepClone(value);
+        const control = $(selector);
+        if (control.length) {
+            if (isCheckbox) control.prop('checked', !!value).trigger('input', { source: 'snapshot' });
+            else {
+                control.val(value);
+                // Model lists can be replaced asynchronously by the source / proxy
+                // status check. Keep the saved setting as the authority and let
+                // that native refresh select it once the matching options exist,
+                // instead of firing a model change against a stale empty list.
+                if (!OPENAI_API_MODEL_KEYS.has(key)) {
+                    control.trigger(control.is('select') ? 'change' : 'input', { source: 'snapshot' });
+                }
+            }
+        }
+        changed = true;
+    }
+    if (changed) saveSettingsDebounced();
+    return changed;
+}
+
+function applyProxyPreset(name) {
+    if (!name) return false;
+    const select = $('#openai_proxy_preset');
+    const option = select.find('option').filter((_, item) => String(item.value) === String(name));
+    if (!option.length) {
+        toastr.warning(`找不到代理预设“${name}”，已保留当前代理。`, '一键快照');
+        return false;
+    }
+    if (String(select.val()) === String(name)) return false;
+    select.val(name).trigger('change');
+    return true;
+}
+
+async function applyApiState(state) {
+    if (!state?.chatCompletion) return false;
+    let changed = false;
+    if (main_api !== 'openai') {
+        const selector = $('#main_api');
+        if (!selector.find('option[value="openai"]').length) {
+            toastr.warning('未找到聊天补全 API，已跳过 API 快照。', '一键快照');
+            return false;
+        }
+        selector.val('openai').trigger('change');
+        changed = true;
+    }
+    // Changing a source and a named proxy both start SillyTavern's native
+    // status check. Apply the proxy first, then change the source: the source
+    // handler cancels that earlier check and reconnects once with the final
+    // proxy/source pair instead of leaving two checks racing for the status.
+    changed = applyProxyPreset(state.chatCompletion.proxyPreset) || changed;
+    changed = applyOpenAIConnectionState(state.chatCompletion.values) || changed;
+    for (const type of API_TEMPLATE_TYPES) {
+        changed = (await selectPresetReference(type, state.templates?.[type])) || changed;
+    }
+    return changed;
+}
+
+function apiStateLines(state) {
+    if (!state) return [];
+    const lines = [`主 API：${API_MAIN_LABELS.openai}`];
+    if (state.chatCompletion?.values?.chat_completion_source) lines.push(`聊天补全来源：${state.chatCompletion.values.chat_completion_source}`);
+    if (state.chatCompletion?.model) lines.push(`模型：${state.chatCompletion.model}`);
+    if (state.chatCompletion?.proxyPreset && state.chatCompletion.proxyPreset !== 'None') lines.push(`代理预设：${state.chatCompletion.proxyPreset}`);
+    const templateLabels = { context: '上下文模板', instruct: '指令模板', sysprompt: '系统提示词', reasoning: '推理格式' };
+    for (const type of API_TEMPLATE_TYPES) {
+        if (state.templates?.[type]?.name) lines.push(`${templateLabels[type]}：${state.templates[type].name}`);
+    }
+    if (Object.hasOwn(state.chatCompletion?.values ?? {}, 'custom_prompt_post_processing')) {
+        const savedValue = state.chatCompletion.values.custom_prompt_post_processing;
+        const liveLabel = $('#custom_prompt_post_processing option').filter((_, option) => String(option.value) === String(savedValue)).text().trim();
+        lines.push(`提示词后处理：${state.chatCompletion.promptPostProcessingLabel || liveLabel || (savedValue ? String(savedValue) : '无')}`);
+    }
+    return lines;
+}
+
+function currentThemeName() {
+    return String($('#themes').val() ?? power_user.theme ?? '').trim();
+}
+
+function captureTheme() {
+    return { name: currentThemeName() };
+}
+
+function themeNameFromPayload(payload) {
+    return String(typeof payload?.theme === 'string' ? payload.theme : payload?.theme?.name ?? '').trim();
+}
+
+function isThemeManagerAvailable() {
+    // Do not treat settings left behind by an uninstalled extension as an
+    // active binding. The manager creates this panel as part of its startup.
+    return Boolean(document.getElementById('theme-manager-panel'));
+}
+
+function themeManagerCharacterBindings() {
+    if (!isThemeManagerAvailable()) return null;
+    const store = extension_settings[THEME_MANAGER_EXTENSION_KEY];
+    if (!store || typeof store !== 'object') return null;
+    const bindings = store[THEME_MANAGER_CHARACTER_BINDINGS_KEY];
+    return bindings && typeof bindings === 'object' ? bindings : null;
+}
+
+function themeManagerThemeForCharacter(avatar = currentCharacter()?.avatar) {
+    if (!avatar) return '';
+    return String(themeManagerCharacterBindings()?.[avatar] ?? '').trim();
+}
+
+function hasThemeManagerConflict(snapshot, character = currentCharacter()) {
+    const snapshotTheme = themeNameFromPayload(snapshot?.payload);
+    const managerTheme = themeManagerThemeForCharacter(character?.avatar);
+    return Boolean(snapshotTheme && managerTheme && snapshotTheme !== managerTheme);
+}
+
+function setThemeManagerThemeForCharacter(avatar, themeName) {
+    const bindings = themeManagerCharacterBindings();
+    if (!bindings || !avatar || !themeName) return false;
+    if (bindings[avatar] === themeName) return false;
+    bindings[avatar] = themeName;
+    saveSettingsDebounced();
+    return true;
+}
+
+function removeThemeManagerThemeIfOwned(snapshot, avatar = currentCharacter()?.avatar) {
+    const bindings = themeManagerCharacterBindings();
+    const snapshotTheme = themeNameFromPayload(snapshot?.payload);
+    if (!bindings || !avatar || !snapshotTheme || bindings[avatar] !== snapshotTheme) return false;
+    delete bindings[avatar];
+    saveSettingsDebounced();
+    return true;
+}
+
+async function hydrateNativeTheme(name) {
+    if (typeof window.baibaokuHydrateTheme !== 'function') return;
+    const headers = SillyTavern.getContext?.().getRequestHeaders?.();
+    if (!headers) return;
+    try {
+        const response = await fetch('/api/plugins/baibaoku/v1/themes/get', {
+            method: 'POST', headers, body: JSON.stringify({ name }),
+        });
+        const payload = response.ok ? await response.json() : null;
+        if (payload?.ok && payload.data) window.baibaokuHydrateTheme(payload.data);
+    } catch {
+        // The optional lazy-theme bridge is not part of the snapshot feature.
+    }
+}
+
+async function applyTheme(state) {
+    const name = themeNameFromPayload({ theme: state });
+    if (!name) return false;
+    const select = $('#themes');
+    if (!select.find('option').filter((_, option) => String(option.value) === name).length) {
+        toastr.warning(`找不到美化主题“${name}”，已跳过该部分。`, '一键快照');
+        return false;
+    }
+    if (String(select.val()) === name) return false;
+    await hydrateNativeTheme(name);
+    select.val(name).trigger('change');
+    return true;
+}
+
+function updateRenamedThemeReferences(previousName, nextName) {
+    if (!previousName || !nextName || previousName === nextName) return;
+    let changed = false;
+    for (const snapshot of settings().snapshots) {
+        if (!snapshot.scopes?.theme || themeNameFromPayload(snapshot.payload) !== previousName) continue;
+        if (typeof snapshot.payload?.theme === 'string') snapshot.payload.theme = { name: nextName };
+        else {
+            snapshot.payload ??= {};
+            snapshot.payload.theme ??= {};
+            snapshot.payload.theme.name = nextName;
+        }
+        changed = true;
+    }
+    // Theme Manager stores the binding by display name too. Keep its own
+    // role bindings valid when that manager renames a theme in place.
+    const managerBindings = themeManagerCharacterBindings();
+    if (managerBindings) {
+        for (const [avatar, themeName] of Object.entries(managerBindings)) {
+            if (themeName !== previousName) continue;
+            managerBindings[avatar] = nextName;
+            changed = true;
+        }
+    }
+    if (changed) saveSettingsDebounced();
+}
+
+function installThemeRenameObserver() {
+    const select = document.querySelector('#themes');
+    if (!select || select === observedThemeSelect) return;
+    themeOptionObserver?.disconnect();
+    observedThemeSelect = select;
+    for (const option of select.options) observedThemeOptionNames.set(option, String(option.value ?? ''));
+    themeOptionObserver = new MutationObserver(records => {
+        for (const record of records) {
+            if (record.type === 'attributes' && record.target instanceof HTMLOptionElement) {
+                const previousName = observedThemeOptionNames.get(record.target) ?? '';
+                const nextName = String(record.target.value ?? '');
+                updateRenamedThemeReferences(previousName, nextName);
+                observedThemeOptionNames.set(record.target, nextName);
+            }
+            if (record.type === 'childList') {
+                for (const node of record.addedNodes) {
+                    if (node instanceof HTMLOptionElement) observedThemeOptionNames.set(node, String(node.value ?? ''));
+                    if (node instanceof HTMLElement) {
+                        for (const option of node.querySelectorAll?.('option') ?? []) observedThemeOptionNames.set(option, String(option.value ?? ''));
+                    }
+                }
+            }
+        }
+    });
+    themeOptionObserver.observe(select, { subtree: true, childList: true, attributes: true, attributeFilter: ['value'] });
 }
 
 function captureRegexSource(type) {
@@ -509,6 +906,24 @@ function refreshRegexPanel() {
     $('#regex_preset_toggle').prop('checked', isPresetScriptsAllowed(getCurrentPresetAPI(), getCurrentPresetName()));
 }
 
+async function reloadChatForRegexChange() {
+    const chatId = String(getCurrentChatId() ?? '');
+    if (!chatId) return;
+    // SillyTavern's reload mutex deliberately drops a request while another
+    // reload is in flight. Regex changes must still get one render once that
+    // earlier reload is finished; otherwise the panel changes but the visible
+    // chat keeps the old scoped-rule result.
+    for (let attempt = 0; attempt < 3; attempt++) {
+        let waitCount = 0;
+        while (reloadChatMutex.isBusy && waitCount++ < 100) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (String(getCurrentChatId() ?? '') !== chatId) return;
+        await reloadCurrentChat();
+        if (!reloadChatMutex.isBusy) return;
+    }
+}
+
 async function applyRegex(state) {
     if (!state?.sources) return;
     const context = state.context ?? {};
@@ -541,9 +956,10 @@ async function applyRegex(state) {
         refreshRegexPanel();
         // Match the native regex panel: message DOM has already been
         // transformed by the previous rule set, so it must be rendered from
-        // the stored chat once after any actual regex-state change. When the
-        // snapshot already matches, this branch is deliberately skipped.
-        if (getCurrentChatId()) await reloadCurrentChat();
+        // the stored chat once after any actual regex-state change. The
+        // helper waits out a concurrent native reload instead of losing this
+        // request to SillyTavern's non-queueing reload mutex.
+        await reloadChatForRegexChange();
     }
 }
 
@@ -557,8 +973,16 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
     const currentFirstMes = character.first_mes;
     const hasAlternateGreetings = Array.isArray(character.data?.alternate_greetings);
     const currentAlternateGreetings = deepClone(character.data?.alternate_greetings ?? []);
+    const currentExtensions = character.data?.extensions ?? {};
+    const hasCurrentScopedRegex = Object.hasOwn(currentExtensions, 'regex_scripts');
+    const currentScopedRegex = deepClone(currentExtensions.regex_scripts);
     const data = deepClone(state.data ?? {});
     data.extensions ??= {};
+    // Older saved versions may still contain regex_scripts. Always keep the
+    // live card value instead: the regex panel and regex snapshot scope own
+    // that data and must not be overwritten by a character-version switch.
+    delete data.extensions.regex_scripts;
+    if (hasCurrentScopedRegex) data.extensions.regex_scripts = currentScopedRegex;
     data.extensions.one_click_snapshot = { versionId };
     if (preserveGreetingCatalog) {
         if (hasAlternateGreetings) data.alternate_greetings = currentAlternateGreetings;
@@ -702,6 +1126,11 @@ async function applyPreset(state) {
         manager.selectPreset(state.presetValue);
         if (presetLoaded) await presetLoaded;
     }
+    // Do this after selecting the preset: native selection loads its current
+    // file values first, then the snapshot restores its saved switch state.
+    // When everything already matches, applyPresetParameters performs no UI
+    // writes and therefore cannot cause an unnecessary preset reload.
+    applyPresetParameters(state.parameters);
     const savedPromptEntries = Array.isArray(state.promptEntries)
         ? state.promptEntries
         // Older snapshots recorded the complete order. Reinterpret that
@@ -762,8 +1191,10 @@ async function buildSnapshot(name, scopes) {
             // the version itself, so later edits are naturally reflected.
             character: character ? { versionId: currentCharacterVersion()?.id ?? null, versionName: currentCharacterVersion()?.name ?? '当前未命名状态', data: { avatar: character.avatar, name: character.name } } : null,
             persona: persona ? { versionId: currentPersonaVersion()?.id ?? null, versionName: currentPersonaVersion()?.name ?? '当前未命名状态', data: persona } : null,
+            theme: scopes.theme ? captureTheme() : null,
             worldInfo: scopes.worldInfo ? await captureWorldInfo(scopes.worldSources) : null,
             preset: scopes.preset ? capturePreset() : null,
+            api: scopes.api ? captureApiState() : null,
             regex: scopes.regex ? captureRegex(scopes.regexSources) : null,
         },
     };
@@ -779,13 +1210,38 @@ async function createSnapshot(name, scopes, group = '') {
     return snapshot;
 }
 
-async function updateSnapshot(snapshot) {
-    const replacement = await buildSnapshot(snapshot.name, snapshot.scopes);
+async function updateSnapshot(snapshot, scopes = snapshot.scopes) {
+    const replacement = await buildSnapshot(snapshot.name, scopes);
     if (!replacement) return false;
     Object.assign(snapshot, replacement, { id: snapshot.id, name: snapshot.name, group: snapshot.group ?? '', createdAt: snapshot.createdAt, updatedAt: Date.now() });
     saveSettingsDebounced();
     toastr.success(`已更新快照：${snapshot.name}`, '一键快照');
     return true;
+}
+
+function normalizedSnapshotScopes(scopes = {}) {
+    const sourceScopes = (selected, recordedSources, defaults) => {
+        if (!selected) return {};
+        // A saved source map is authoritative. In particular, { global: true }
+        // must stay global-only rather than silently turning into “all sources”.
+        if (recordedSources && Object.keys(recordedSources).length) return deepClone(recordedSources);
+        // Only legacy snapshots that predate source-level selection fall back to
+        // the old all-sources behavior.
+        return deepClone(defaults);
+    };
+    return {
+        // Missing values mean that an older snapshot never recorded that
+        // category. Do not quietly add newly introduced categories on update.
+        character: scopes.character === true,
+        persona: scopes.persona === true,
+        theme: scopes.theme === true,
+        worldInfo: scopes.worldInfo === true,
+        preset: scopes.preset === true,
+        api: scopes.api === true,
+        regex: scopes.regex === true,
+        worldSources: sourceScopes(scopes.worldInfo === true, scopes.worldSources, DEFAULT_CAPTURE_SCOPES.worldSources),
+        regexSources: sourceScopes(scopes.regex === true, scopes.regexSources, DEFAULT_CAPTURE_SCOPES.regexSources),
+    };
 }
 
 function getSnapshot(snapshotId) {
@@ -822,7 +1278,7 @@ function snapshotRequirements(snapshot) {
     };
 }
 
-function applyCompatibility(snapshot) {
+function applyCompatibility(snapshot, { allowThemeOverride = false } = {}) {
     const requirements = snapshotRequirements(snapshot);
     const activeCharacter = currentCharacter()?.avatar ?? null;
     const activeChatId = String(getCurrentChatId() ?? '');
@@ -831,6 +1287,7 @@ function applyCompatibility(snapshot) {
         characterMismatch: requirements.needsCharacter && (!requirements.characterAvatar || requirements.characterAvatar !== activeCharacter),
         personaMismatch: requirements.needsPersona && (!requirements.personaAvatar || requirements.personaAvatar !== user_avatar),
         chatMismatch: requirements.hasChatWorldbook && (!requirements.chatId || requirements.chatId !== activeChatId),
+        themeMismatch: !allowThemeOverride && hasThemeManagerConflict(snapshot),
     };
 }
 
@@ -888,13 +1345,14 @@ function snapshotCanBindCurrentChat(snapshot, { notify = false, allowUserChange 
     return false;
 }
 
-async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = false, excludeChatWorldbook = false, persistCharacter = true, preserveGreetingCatalog = false } = {}) {
+async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = false, excludeChatWorldbook = false, persistCharacter = true, preserveGreetingCatalog = false, allowThemeOverride = false } = {}) {
     if (!snapshot || applying) return false;
-    const compatibility = applyCompatibility(snapshot);
+    const compatibility = applyCompatibility(snapshot, { allowThemeOverride });
     const incompatible = [];
     if (compatibility.characterMismatch) incompatible.push(`角色内容（${compatibility.requirements.characterName}）`);
     if (compatibility.personaMismatch) incompatible.push(`用户内容（${compatibility.requirements.personaName}）`);
     if (compatibility.chatMismatch) incompatible.push('聊天绑定世界书');
+    if (compatibility.themeMismatch) incompatible.push(`角色美化（已绑定${themeManagerThemeForCharacter()}）`);
     if (incompatible.length && !silent && !skipMismatchPrompt) {
         const confirmed = await Popup.show.confirm(
             '部分快照内容不匹配',
@@ -922,8 +1380,14 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         // just before regex forces a chat reload.
         if (snapshot.scopes?.character && !compatibility.characterMismatch) await applySnapshotCharacterVersion(payload.character, { persist: persistCharacter, preserveGreetingCatalog: true });
         if (snapshot.scopes?.persona && !compatibility.personaMismatch) await applySnapshotPersonaVersion(payload.persona);
+        if (snapshot.scopes?.theme && !compatibility.themeMismatch) await applyTheme(payload.theme);
         if (snapshot.scopes?.worldInfo) await applyWorldInfo(payload.worldInfo, { excludedSources });
+        // Loading a native preset may restore its own linked connection and
+        // start a status check. Apply it first; the snapshot's Chat
+        // Completion state must be the final authority when both scopes are
+        // selected (for example, “preset A + API B”).
         if (snapshot.scopes?.preset) await applyPreset(payload.preset);
+        if (snapshot.scopes?.api) await applyApiState(payload.api);
         if (snapshot.scopes?.regex) await applyRegex(payload.regex);
         binding().lastAppliedSnapshotId = snapshot.id;
         saveSettingsDebounced();
@@ -1107,7 +1571,12 @@ function snapshotCanBindToCurrentCharacter(snapshot, { notify = false } = {}) {
     if (!matches && notify) {
         toastr.warning(`无法绑定“${snapshot.name}”：角色不匹配（快照：${requirements.characterName}）。`, '一键快照');
     }
-    return matches;
+    if (!matches) return false;
+    if (hasThemeManagerConflict(snapshot, character)) {
+        if (notify) toastr.warning(`无法绑定“${snapshot.name}”：${character.name}已在美化管理助手中绑定“${themeManagerThemeForCharacter(character.avatar)}”。`, '一键快照');
+        return false;
+    }
+    return true;
 }
 
 async function chooseCharacterBindingUserMode(snapshot, requirements, character, { purpose = '角色默认快照' } = {}) {
@@ -1186,6 +1655,8 @@ async function bindSnapshotToCurrentCharacter(snapshot) {
         return false;
     }
     settings().characterBindings[character.avatar] = { snapshotId: snapshot.id, enabled: true, userMode };
+    const snapshotTheme = themeNameFromPayload(snapshot.payload);
+    if (snapshot.scopes?.theme && snapshotTheme) setThemeManagerThemeForCharacter(character.avatar, snapshotTheme);
     saveSettingsDebounced();
     toastr.success(`已绑定为“${character.name}”的角色默认快照。`, '一键快照');
     return true;
@@ -1194,15 +1665,27 @@ async function bindSnapshotToCurrentCharacter(snapshot) {
 function unbindSnapshotFromCurrentCharacter(snapshotId) {
     const character = currentCharacter();
     if (!character?.avatar || settings().characterBindings[character.avatar]?.snapshotId !== snapshotId) return false;
+    removeThemeManagerThemeIfOwned(getSnapshot(snapshotId), character.avatar);
     delete settings().characterBindings[character.avatar];
     saveSettingsDebounced();
     return true;
 }
 
-function toggleCurrentCharacterBinding(snapshotId) {
+async function toggleCurrentCharacterBinding(snapshotId) {
     const record = currentCharacterBinding();
     if (!record || record.snapshotId !== snapshotId) return false;
-    record.enabled = record.enabled === false;
+    const snapshot = getSnapshot(snapshotId);
+    const character = currentCharacter();
+    if (!snapshot || !character?.avatar) return false;
+    if (record.enabled !== false) {
+        record.enabled = false;
+        removeThemeManagerThemeIfOwned(snapshot, character.avatar);
+    } else {
+        if (!snapshotCanBindToCurrentCharacter(snapshot, { notify: true })) return false;
+        record.enabled = true;
+        const snapshotTheme = themeNameFromPayload(snapshot.payload);
+        if (snapshot.scopes?.theme && snapshotTheme) setThemeManagerThemeForCharacter(character.avatar, snapshotTheme);
+    }
     saveSettingsDebounced();
     return true;
 }
@@ -1228,6 +1711,12 @@ function greetingCandidates(character = currentCharacter()) {
         swipeIndex,
         fingerprint: greetingFingerprint(greeting.text),
     })).filter(greeting => greeting.text.trim());
+}
+
+function greetingLabelFromKey(key) {
+    if (key === 'first') return '主开场白';
+    const alternate = /^alternate:(\d+)$/.exec(String(key));
+    return alternate ? `备选开场白 ${Number(alternate[1]) + 1}` : null;
 }
 
 function greetingBindingRecords(character = currentCharacter()) {
@@ -1263,19 +1752,34 @@ function openingGreetingCandidates(character) {
 }
 
 function snapshotGreetingBindings(snapshotId) {
-    return Object.entries(settings().greetingBindings).flatMap(([avatar, records]) => {
+    let migrated = false;
+    const bindings = Object.entries(settings().greetingBindings).flatMap(([avatar, records]) => {
         const character = characters.find(item => item?.avatar === avatar);
         const candidates = greetingCandidates(character);
-        return Object.entries(records ?? {})
+        const matchingBindings = Object.entries(records ?? {})
             .filter(([, record]) => record?.snapshotId === snapshotId)
-            .map(([key, record]) => ({
-                avatar,
-                characterName: character?.name ?? avatar,
-                key,
-                label: record.label ?? candidates.find(candidate => candidate.key === key)?.label ?? '已变更的开场白',
-                enabled: record.enabled !== false,
-            }));
+            .map(([key, record]) => {
+                const liveLabel = candidates.find(candidate => candidate.key === key)?.label;
+                // Old bindings did not store their display label. When the
+                // full character card happens to be loaded, backfill it once
+                // so opening the library from the landing page never needs
+                // to guess from a lightweight character list again.
+                if (!record.label && liveLabel) {
+                    record.label = liveLabel;
+                    migrated = true;
+                }
+                return {
+                    avatar,
+                    characterName: character?.name || record.characterName || avatar,
+                    key,
+                    label: record.label || liveLabel || greetingLabelFromKey(key) || '已变更的开场白',
+                    enabled: record.enabled !== false,
+                };
+        });
+        return matchingBindings;
     });
+    if (migrated) saveSettingsDebounced();
+    return bindings;
 }
 
 async function chooseGreetingCandidate(character, { onlySnapshotId = null, title = '绑定开场白快照', confirmLabel = '确认绑定' } = {}) {
@@ -1323,6 +1827,7 @@ async function bindSnapshotToGreeting(snapshot) {
         snapshotId: snapshot.id,
         fingerprint: candidate.fingerprint,
         label: candidate.label,
+        characterName: character.name,
         userMode,
     };
     saveSettingsDebounced();
@@ -1844,15 +2349,140 @@ function installVersionMenu() {
     }, true);
 }
 
+const SNAPSHOT_SCOPE_TAGS = [
+    ['character', '角色'],
+    ['persona', '用户'],
+    ['theme', '美化'],
+    ['worldInfo', '世界书'],
+    ['preset', '预设'],
+    ['api', 'API'],
+    ['regex', '正则'],
+];
+
+const SNAPSHOT_SCOPE_SOURCE_OPTIONS = {
+    worldInfo: {
+        title: '世界书记录范围',
+        sourcesKey: 'worldSources',
+        options: [
+            ['global', '全局世界书'],
+            ['characterMain', '角色主世界书'],
+            ['characterExtra', '角色附加世界书'],
+            ['user', '用户绑定世界书'],
+            ['chat', '聊天世界书'],
+        ],
+    },
+    regex: {
+        title: '正则记录范围',
+        sourcesKey: 'regexSources',
+        options: [
+            ['global', '全局正则'],
+            ['scoped', '角色局部正则'],
+            ['preset', '当前预设正则'],
+        ],
+    },
+};
+
+async function configureSnapshotScopeSources(state, key) {
+    const configuration = SNAPSHOT_SCOPE_SOURCE_OPTIONS[key];
+    if (!configuration) return true;
+    const root = $('<div class="ocs-scope-source-picker"></div>');
+    root.append($('<p></p>').text('选择本次更新要记录的范围；这些改动会在点击快照“更新”后才保存。'));
+    const choices = $('<div class="ocs-scope-source-choices"></div>');
+    for (const [source, label] of configuration.options) {
+        const input = $('<input type="checkbox">').val(source).prop('checked', state[configuration.sourcesKey][source] === true);
+        choices.append($('<label class="checkbox_label ocs-scope"></label>').append(input, document.createTextNode(label)));
+    }
+    root.append(choices);
+    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, configuration.title, {
+        wide: false,
+        leftAlign: true,
+        okButton: '确定',
+        cancelButton: '取消',
+    });
+    popup.dlg.classList.add('ocs-dialog');
+    if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return false;
+    const sources = Object.fromEntries(choices.find('input:checked').toArray().map(input => [input.value, true]));
+    state[configuration.sourcesKey] = sources;
+    state[key] = Object.keys(sources).length > 0;
+    return true;
+}
+
 function scopeBadges(snapshot) {
-    const badges = $('<div class="ocs-scope-badges"></div>');
-    const scopes = snapshot.scopes ?? {};
-    if (scopes.character) badges.append('<span>角色</span>');
-    if (scopes.persona) badges.append('<span>用户</span>');
-    if (scopes.worldInfo) badges.append('<span>世界书</span>');
-    if (scopes.preset) badges.append('<span>预设</span>');
-    if (scopes.regex) badges.append('<span>正则</span>');
+    // This is intentionally draft-only state. It belongs to the rendered card,
+    // never to settings, so closing the library discards unfinished edits.
+    const state = normalizedSnapshotScopes(snapshot.scopes);
+    const badges = $('<div class="ocs-scope-badges ocs-editable-scope-badges"></div>').data('ocsScopeDraft', state);
+    const render = () => {
+        badges.empty();
+        const present = SNAPSHOT_SCOPE_TAGS.filter(([key]) => state[key]);
+        for (const [key, label] of present) {
+            const tag = $('<span class="ocs-scope-badge ocs-scope-tag"></span>');
+            const configuration = SNAPSHOT_SCOPE_SOURCE_OPTIONS[key];
+            if (configuration) {
+                tag.append($('<button type="button" class="ocs-scope-tag-configure"></button>')
+                    .attr('title', `编辑${label}的记录范围`)
+                    .text(label)
+                    .on('click', async () => {
+                        if (await configureSnapshotScopeSources(state, key)) render();
+                    }));
+            } else {
+                tag.append(document.createTextNode(label));
+            }
+            const remove = $('<button type="button" class="ocs-scope-tag-remove" title="从本次更新中移除"></button>')
+                .attr('aria-label', `从本次更新中移除${label}`)
+                .append('<i class="fa-solid fa-xmark"></i>')
+                .on('click', () => {
+                    state[key] = false;
+                    render();
+                });
+            tag.append(remove);
+            badges.append(tag);
+        }
+        const available = SNAPSHOT_SCOPE_TAGS.filter(([key]) => !state[key]);
+        if (!available.length) return;
+        const add = $('<button type="button" class="ocs-scope-add" title="添加记录范围" aria-label="添加记录范围"><i class="fa-solid fa-plus"></i></button>');
+        add.on('click', async () => {
+            const selector = $('<select class="text_pole"></select>');
+            for (const [key, label] of available) selector.append($('<option></option>').val(key).text(label));
+            const popup = new Popup(selector.get(0), POPUP_TYPE.TEXT, '添加记录范围', {
+                wide: false,
+                leftAlign: true,
+                okButton: '添加',
+                cancelButton: '取消',
+            });
+            popup.dlg.classList.add('ocs-dialog');
+            if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return;
+            const key = String(selector.val());
+            if (SNAPSHOT_SCOPE_SOURCE_OPTIONS[key]) {
+                if (!await configureSnapshotScopeSources(state, key)) return;
+            } else {
+                state[key] = true;
+            }
+            render();
+        });
+        badges.append(add);
+    };
+    render();
     return badges;
+}
+
+function scopeBadgeDraft(badges) {
+    const state = badges.data('ocsScopeDraft');
+    return {
+        character: state.character === true,
+        persona: state.persona === true,
+        theme: state.theme === true,
+        worldInfo: state.worldInfo === true,
+        preset: state.preset === true,
+        api: state.api === true,
+        regex: state.regex === true,
+        worldSources: state.worldInfo ? deepClone(state.worldSources) : {},
+        regexSources: state.regex ? deepClone(state.regexSources) : {},
+    };
+}
+
+function hasSnapshotScope(scopes) {
+    return SNAPSHOT_SCOPE_TAGS.some(([key]) => scopes[key] === true);
 }
 
 function fillGroupSelect(select, { all = false } = {}) {
@@ -1941,6 +2571,12 @@ async function showSnapshotContents(snapshot) {
         const version = payload.persona?.versionName ?? '当前未命名状态';
         root.append($('<div class="ocs-version-value"><span>用户版本</span><strong></strong></div>').find('strong').text(`${name} · ${version}`).end());
     }
+    if (snapshot.scopes?.theme) {
+        const savedName = themeNameFromPayload(payload);
+        const exists = $('#themes option').filter((_, option) => String(option.value) === savedName).length > 0;
+        const label = savedName ? (exists ? savedName : `${savedName}（已删除）`) : '未选择美化';
+        root.append($('<div class="ocs-version-value"><span>界面美化</span><strong></strong></div>').find('strong').text(label).end());
+    }
     if (snapshot.scopes?.worldInfo) {
         const section = makeDrawer('ocs-content-section ocs-content-world', '世界书启用');
         const sectionBody = drawerBody(section);
@@ -1977,7 +2613,14 @@ async function showSnapshotContents(snapshot) {
         const nodes = [];
         const groups = new Map();
         const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-        const entriesDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
+        const presetDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
+        const presetBody = drawerBody(presetDrawer);
+        const parameterLines = presetParameterLines(payload.preset?.parameters);
+        const parameterDrawer = makeDrawer('ocs-content-preset-section', '预设参数', parameterLines.length ? `${parameterLines.length} 项` : '');
+        drawerBody(parameterDrawer).append(itemList(parameterLines, '该快照未保存预设参数'));
+        presetBody.append(parameterDrawer);
+
+        const entriesDrawer = makeDrawer('ocs-content-preset-section', '启用条目', `${enabledEntries.length} 条`);
         const entriesBody = drawerBody(entriesDrawer);
         for (const entry of enabledEntries) {
             const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
@@ -2003,7 +2646,14 @@ async function showSnapshotContents(snapshot) {
         }
         flushFlat();
         if (!nodes.length) entriesBody.append(itemList([], '没有启用的预设条目'));
-        root.append(entriesDrawer);
+        presetBody.append(entriesDrawer);
+        root.append(presetDrawer);
+    }
+    if (snapshot.scopes?.api) {
+        const state = payload.api ?? {};
+        const section = makeDrawer('ocs-content-section ocs-content-api', 'API', state.chatCompletion?.model || API_MAIN_LABELS[state.mainApi] || '未选择');
+        drawerBody(section).append(itemList(apiStateLines(state), '该快照未保存 API 设置'));
+        root.append(section);
     }
     if (snapshot.scopes?.regex) {
         const sources = payload.regex?.sources ?? {};
@@ -2018,9 +2668,12 @@ async function showSnapshotContents(snapshot) {
             const source = sources[key];
             if (!source) continue;
             const enabled = (source.scripts ?? []).filter(script => script.enabled).map(script => script.label || script.id);
+            const count = key === 'preset'
+                ? `${payload.regex?.context?.presetName || '未选择预设'} · ${enabled.length} 条`
+                : `${enabled.length} 条`;
             // Regex categories are source markers, like worldbook sources;
             // keep their children behind the same optional disclosure layer.
-            const drawer = makeDrawer('ocs-content-source ocs-content-regex-source', title, `${enabled.length} 条`);
+            const drawer = makeDrawer('ocs-content-source ocs-content-regex-source', title, count);
             drawerBody(drawer).append(itemList(enabled));
             body.append(drawer);
         }
@@ -2061,7 +2714,8 @@ function renderSnapshotList(root) {
             cardHeader.append($('<h4></h4>').text(snapshot.name));
             card.append(cardHeader);
             card.append($('<time></time>').text(`更新于 ${new Date(snapshot.updatedAt).toLocaleString()}`));
-            card.append(scopeBadges(snapshot));
+            const scopeTags = scopeBadges(snapshot);
+            card.append(scopeTags);
             const boundChats = snapshotChatBindings(snapshot.id);
             if (boundChats.length) {
                 const currentChat = currentChatReference();
@@ -2081,7 +2735,14 @@ function renderSnapshotList(root) {
                 if (await applySnapshot(snapshot)) renderSnapshotList(root);
             }));
             actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot)));
-            actions.append($('<button class="ocs-button">更新</button>').on('click', async () => { await updateSnapshot(snapshot); renderSnapshotList(root); }));
+            actions.append($('<button class="ocs-button">更新</button>').on('click', async () => {
+                const scopes = scopeBadgeDraft(scopeTags);
+                if (!hasSnapshotScope(scopes)) {
+                    toastr.warning('至少保留一个记录范围。', '一键快照');
+                    return;
+                }
+                if (await updateSnapshot(snapshot, scopes)) renderSnapshotList(root);
+            }));
             actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameSnapshot(snapshot); renderSnapshotList(root); }));
             actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setSnapshotGroup(snapshot); renderGroups(root); renderSnapshotList(root); }));
             actions.append($(`<button class="ocs-button">${isBound ? '解绑聊天' : '绑定聊天'}</button>`).on('click', async () => {
@@ -2102,8 +2763,8 @@ function renderSnapshotList(root) {
             }));
             if (currentCharacterDefault) {
                 const enabled = currentCharacterBinding()?.enabled !== false;
-                actions.append($(`<button class="ocs-button">${enabled ? '停用角色应用' : '启用角色应用'}</button>`).on('click', () => {
-                    if (toggleCurrentCharacterBinding(snapshot.id)) renderSnapshotList(root);
+                actions.append($(`<button class="ocs-button">${enabled ? '停用角色应用' : '启用角色应用'}</button>`).on('click', async () => {
+                    if (await toggleCurrentCharacterBinding(snapshot.id)) renderSnapshotList(root);
                 }));
             }
             actions.append($('<button class="ocs-button">绑定开场白</button>').on('click', async () => {
@@ -2116,12 +2777,17 @@ function renderSnapshotList(root) {
             }
             actions.append($('<button class="ocs-button ocs-danger">删除</button>').on('click', async () => {
                 if (!await Popup.show.confirm('删除快照', `删除“${snapshot.name}”？角色、世界书和预设本身不会删除。`)) return;
+                const themeManagerBindings = themeManagerCharacterBindings();
+                const snapshotTheme = themeNameFromPayload(snapshot.payload);
                 settings().snapshots = settings().snapshots.filter(item => item.id !== snapshot.id);
                 if (binding().snapshotId === snapshot.id) binding().snapshotId = null;
                 if (binding().lastAppliedSnapshotId === snapshot.id) binding().lastAppliedSnapshotId = null;
                 delete settings().snapshotBindings[snapshot.id];
                 for (const [avatar, record] of Object.entries(settings().characterBindings)) {
-                    if (record?.snapshotId === snapshot.id) delete settings().characterBindings[avatar];
+                    if (record?.snapshotId === snapshot.id) {
+                        if (themeManagerBindings?.[avatar] === snapshotTheme) delete themeManagerBindings[avatar];
+                        delete settings().characterBindings[avatar];
+                    }
                 }
                 for (const [avatar, records] of Object.entries(settings().greetingBindings)) {
                     for (const [key, record] of Object.entries(records ?? {})) {
@@ -2172,8 +2838,10 @@ async function openSnapshotPopup() {
                     <div class="ocs-scope-grid">
                         <label class="checkbox_label ocs-scope" for="ocs-scope-character"><input id="ocs-scope-character" type="checkbox" value="character" data-snapshot-scope checked>角色版本</label>
                         <label class="checkbox_label ocs-scope" for="ocs-scope-persona"><input id="ocs-scope-persona" type="checkbox" value="persona" data-snapshot-scope checked>用户版本</label>
+                        <label class="checkbox_label ocs-scope" for="ocs-scope-theme"><input id="ocs-scope-theme" type="checkbox" value="theme" data-snapshot-scope checked>界面美化</label>
                         <div class="ocs-world-scope is-enabled"><label class="checkbox_label ocs-scope" for="ocs-scope-world"><input id="ocs-scope-world" type="checkbox" value="worldInfo" data-snapshot-scope checked>世界书与条目</label><div class="ocs-world-sources"><label class="checkbox_label ocs-scope" for="ocs-world-global"><input id="ocs-world-global" type="checkbox" value="global" checked>全局世界书</label><label class="checkbox_label ocs-scope" for="ocs-world-char-main"><input id="ocs-world-char-main" type="checkbox" value="characterMain" checked>角色主世界书</label><label class="checkbox_label ocs-scope" for="ocs-world-char-extra"><input id="ocs-world-char-extra" type="checkbox" value="characterExtra" checked>角色附加世界书</label><label class="checkbox_label ocs-scope" for="ocs-world-user"><input id="ocs-world-user" type="checkbox" value="user" checked>用户绑定世界书</label><label class="checkbox_label ocs-scope" for="ocs-world-chat"><input id="ocs-world-chat" type="checkbox" value="chat" checked>聊天世界书</label></div></div>
                         <label class="checkbox_label ocs-scope" for="ocs-scope-preset"><input id="ocs-scope-preset" type="checkbox" value="preset" data-snapshot-scope checked>预设与条目</label>
+                        <label class="checkbox_label ocs-scope" for="ocs-scope-api"><input id="ocs-scope-api" type="checkbox" value="api" data-snapshot-scope checked>聊天补全 API</label>
                         <div class="ocs-world-scope is-enabled ocs-regex-scope"><label class="checkbox_label ocs-scope" for="ocs-scope-regex"><input id="ocs-scope-regex" type="checkbox" value="regex" data-snapshot-scope checked>正则规则</label><div class="ocs-world-sources"><label class="checkbox_label ocs-scope" for="ocs-regex-global"><input id="ocs-regex-global" type="checkbox" value="global" checked>全局正则</label><label class="checkbox_label ocs-scope" for="ocs-regex-scoped"><input id="ocs-regex-scoped" type="checkbox" value="scoped" checked>角色局部正则</label><label class="checkbox_label ocs-scope" for="ocs-regex-preset"><input id="ocs-regex-preset" type="checkbox" value="preset" checked>当前预设正则</label></div></div>
                     </div>
                     <button class="ocs-button ocs-primary ocs-capture-button"><i class="fa-solid fa-camera"></i> 保存快照</button>
@@ -2449,7 +3117,19 @@ async function onChatChanged() {
         // before this version as soon as their chat is visited.
         rememberCurrentChatBinding(snapshot.id);
         saveSettingsDebounced();
-        await applySnapshot(snapshot, { skipMismatchPrompt: true, persistCharacter: false, preserveGreetingCatalog: true });
+        await applySnapshot(snapshot, { skipMismatchPrompt: true, persistCharacter: false, preserveGreetingCatalog: true, allowThemeOverride: true });
+        // Theme Manager applies its character binding shortly after a role is
+        // selected. A chat binding is more specific, so re-assert its theme
+        // after that deferred role-level application has finished.
+        if (snapshot.scopes?.theme) {
+            const boundChatId = chatId;
+            setTimeout(() => {
+                if (String(getCurrentChatId() ?? '') !== boundChatId) return;
+                const currentBinding = chat_metadata?.[METADATA_KEY];
+                if (currentBinding?.snapshotId !== snapshot.id || currentBinding.enabled !== true) return;
+                applyTheme(snapshot.payload?.theme);
+            }, 80);
+        }
         return;
     }
 
@@ -2469,10 +3149,13 @@ async function onChatChanged() {
 $(async () => {
     settings();
     if (syncStoredSnapshotVersionNames()) saveSettingsDebounced();
+    installThemeRenameObserver();
+    setTimeout(installThemeRenameObserver, 1000);
     registerQrAssistantShortcut();
     installQrShortcut();
     installVersionMenu();
     installVersionAutoSync();
+    eventSource.on(event_types.SETTINGS_UPDATED, refreshConnectionStatusDisplay);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     eventSource.on(event_types.CHAT_RENAMED, updateChatBindingAfterRename);
     eventSource.on(event_types.GENERATION_STARTED, applyGreetingSnapshotBeforeGeneration);
