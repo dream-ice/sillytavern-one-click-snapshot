@@ -775,7 +775,12 @@ async function applyTheme(state) {
     }
     if (String(select.val()) === name) return false;
     await hydrateNativeTheme(name);
-    select.val(name).trigger('change');
+    // Theme Manager listens with addEventListener rather than jQuery. Match
+    // its own switching path so the manager's selected tile, background hook,
+    // and SillyTavern's complete native theme application all stay in sync.
+    const nativeSelect = select.get(0);
+    nativeSelect.value = name;
+    nativeSelect.dispatchEvent(new Event('change'));
     return true;
 }
 
