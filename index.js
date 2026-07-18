@@ -43,6 +43,8 @@ let greetingDeferredCharacterDefaultChatId = null;
 let themeOptionObserver = null;
 let observedThemeSelect = null;
 const observedThemeOptionNames = new WeakMap();
+let avatarGalleryStyleObserver = null;
+let observedAvatarGalleryStyle = null;
 
 const deepClone = value => value === undefined ? undefined : structuredClone(value);
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `ocs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -164,6 +166,151 @@ function refreshVersionIndicators() {
     if (personaVersion?.name) {
         $('#persona_description').after($('<span id="one_click_snapshot_persona_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${personaVersion.name}`));
     }
+    refreshVersionAvatarOverrides();
+}
+
+function versionAvatarOwner(type) {
+    return type === 'character' ? currentCharacter()?.avatar ?? null : user_avatar ?? null;
+}
+
+function versionAvatarGallery(type) {
+    // AvatarCropper owns these lists, the files behind them, and its theme
+    // bindings. We intentionally only read the gallery as a picker source.
+    const owner = versionAvatarOwner(type);
+    const images = type === 'character'
+        ? extension_settings.charGalleryImages?.[owner]
+        : extension_settings.userGalleryImages;
+    return Array.isArray(images) ? [...new Set(images.filter(path => typeof path === 'string' && path))] : [];
+}
+
+function hasVersionAvatarGallery(type) {
+    return type === 'character'
+        ? Boolean(extension_settings.charGalleryImages)
+        : Array.isArray(extension_settings.userGalleryImages);
+}
+
+function originalAvatarPath(type) {
+    const owner = versionAvatarOwner(type);
+    if (!owner) return '';
+    return `${type === 'character' ? '/characters/' : '/User Avatars/'}${encodeURIComponent(owner)}`;
+}
+
+function avatarPathLabel(path) {
+    if (!path) return '原始头像';
+    const filename = String(path).split('/').pop() || String(path);
+    try { return decodeURIComponent(filename); } catch { return filename; }
+}
+
+function versionAvatarStateLabel(version) {
+    return version.avatarPath ? avatarPathLabel(version.avatarPath) : '原生头像';
+}
+
+function currentAvatarGalleryTheme() {
+    return String(document.getElementById('themes')?.value ?? 'default');
+}
+
+function syncVersionAvatarToGallery(type, version) {
+    // AvatarCropper's gallery considers this per-theme binding its selected
+    // item. Keep it in step with a version switch so the gallery never says
+    // “A” while the version overlay is visibly showing “B”.
+    if (!version || !hasVersionAvatarGallery(type)) return false;
+    const owner = versionAvatarOwner(type);
+    if (!owner) return false;
+    const theme = currentAvatarGalleryTheme();
+    extension_settings.avatarThemeBindings ??= {};
+    extension_settings.avatarThemeBindings[theme] ??= {};
+    const bindings = extension_settings.avatarThemeBindings[theme];
+    const path = version.avatarPath ?? null;
+    let changed = false;
+    if (!path) {
+        if (Object.hasOwn(bindings, owner)) {
+            delete bindings[owner];
+            changed = true;
+        }
+    } else if (bindings[owner] !== path) {
+        bindings[owner] = path;
+        changed = true;
+    }
+    if (changed) saveSettingsDebounced();
+    return changed;
+}
+
+function versionAvatarDisplayPath(type, version) {
+    const theme = currentAvatarGalleryTheme();
+    const owner = versionAvatarOwner(type);
+    // Once a version has been applied, AvatarCropper remains the live source
+    // of truth. This lets a manual gallery click take over immediately while
+    // the saved version value is kept for the next explicit version apply.
+    const selectedPath = hasVersionAvatarGallery(type)
+        ? extension_settings.avatarThemeBindings?.[theme]?.[owner] ?? null
+        : version?.avatarPath;
+    if (!selectedPath) return null;
+    // Let a gallery image keep the crop that AvatarCropper has associated
+    // with this selected image, exactly as its own CSS engine would.
+    return extension_settings.avatarThemeCrops?.[theme]?.[owner]?.[selectedPath] ?? selectedPath;
+}
+
+function escapeCssString(value) {
+    return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\A ');
+}
+
+function versionAvatarSelectorCss(avatarId) {
+    const escapedId = escapeCssString(avatarId);
+    const encodedId = escapeCssString(encodeURIComponent(avatarId));
+    return [
+        `.avatar img[src*="${escapedId}"]`,
+        `.avatar img[src*="${encodedId}"]`,
+        `#avatar_load_preview[src*="${escapedId}"]`,
+        `#avatar_load_preview[src*="${encodedId}"]`,
+        `.zoomed_avatar img[src*="${escapedId}"]`,
+        `.zoomed_avatar img[src*="${encodedId}"]`,
+    ].join(',\n');
+}
+
+function refreshVersionAvatarOverrides() {
+    const overrides = [
+        ['character', currentCharacterVersion()],
+        ['persona', currentPersonaVersion()],
+    ].flatMap(([type, version]) => {
+        const owner = versionAvatarOwner(type);
+        const path = versionAvatarDisplayPath(type, version);
+        if (!owner || !version) return [];
+        // AvatarCropper refreshes its generated CSS on its own cadence. Keep
+        // a `normal` rule for the original-image case so a just-removed old
+        // binding cannot linger on screen during that short interval.
+        const content = path ? `url("${escapeCssString(path)}")` : 'normal';
+        return `${versionAvatarSelectorCss(owner)} { content: ${content} !important; object-fit: cover !important; }`;
+    });
+    const styleId = 'one-click-snapshot-version-avatar-style';
+    let style = document.getElementById(styleId);
+    if (!overrides.length) {
+        style?.remove();
+        return;
+    }
+    if (!style) {
+        style = document.createElement('style');
+        style.id = styleId;
+        document.head.appendChild(style);
+    }
+    style.textContent = overrides.join('\n');
+}
+
+function installAvatarGallerySelectionObserver(attempt = 0) {
+    const style = document.getElementById('st-avatar-bindings-style');
+    if (style === observedAvatarGalleryStyle) return;
+    avatarGalleryStyleObserver?.disconnect();
+    observedAvatarGalleryStyle = style;
+    if (!style) {
+        // AvatarCropper can load after third-party extensions. Retry briefly,
+        // but never keep a background timer alive when it is not installed.
+        if (attempt < 4) setTimeout(() => installAvatarGallerySelectionObserver(attempt + 1), 1000);
+        return;
+    }
+    // AvatarCropper regenerates this style after a manual gallery choice.
+    // Rebuild only our display bridge from its current binding; never write
+    // the binding back here, or manual choices would get overwritten again.
+    avatarGalleryStyleObserver = new MutationObserver(() => refreshVersionAvatarOverrides());
+    avatarGalleryStyleObserver.observe(style, { childList: true, characterData: true, subtree: true });
 }
 
 function refreshConnectionStatusDisplay() {
@@ -1014,6 +1161,7 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
         // still saving the card for an explicit, manual application.
         await createOrEditCharacter(new CustomEvent('newChat'));
     }
+    if (versionId) syncVersionAvatarToGallery('character', currentCharacterVersion());
     refreshVersionIndicators();
 }
 
@@ -1036,6 +1184,7 @@ async function applyPersona(state, versionId = null) {
     await setUserAvatar(state.avatar, { toastPersonaNameChange: false });
     setPersonaDescription();
     saveSettingsDebounced();
+    if (versionId) syncVersionAvatarToGallery('persona', currentPersonaVersion());
     refreshVersionIndicators();
 }
 
@@ -2230,9 +2379,71 @@ async function openVersionDescriptionEditor(type, version) {
 function versionPreview(type, version) {
     const preview = $('<div class="ocs-version-preview"></div>');
     const content = getVersionDescription(type, version);
+    preview.append($('<div class="ocs-version-avatar-state"></div>').append($('<span></span>').text('头像'), $('<strong></strong>').text(versionAvatarStateLabel(version))));
     preview.append($('<div class="ocs-version-preview-label"></div>').text(type === 'character' ? '角色描述' : '用户描述'));
     preview.append($('<p></p>').text(content || '（空白描述）'));
     return preview;
+}
+
+async function openVersionAvatarPicker(type, version) {
+    const owner = versionAvatarOwner(type);
+    if (!owner) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
+    if (!version) return;
+    const title = `设置“${version.name}”的头像`;
+    const root = $('<div class="ocs-avatar-picker"></div>');
+    root.append($('<header><span class="ocs-kicker">VERSION AVATAR</span><h3></h3><p></p></header>')
+        .find('h3').text(title).end()
+        .find('p').text('版本头像只读取图库中的图片。选择“原生头像”会清除这个版本的临时替换，不修改原生头像或图库插件的主题绑定。').end());
+    if (!hasVersionAvatarGallery(type)) {
+        root.append($('<div class="ocs-avatar-picker-note"></div>').text('未检测到头像图库。可先安装并启用 AvatarCropper，再把图片加入对应角色或用户的图库。'));
+    } else if (!versionAvatarGallery(type).length) {
+        root.append($('<div class="ocs-avatar-picker-note"></div>').text('当前图库还没有图片；此处仍可选择原始头像。'));
+    }
+
+    const choices = $('<div class="ocs-avatar-choice-grid"></div>');
+    let selected = version.avatarPath ?? null;
+    const selectedKey = () => selected ?? '__original__';
+    const renderSelected = () => choices.find('.ocs-avatar-choice').each((_, element) => {
+        const choice = $(element);
+        choice.toggleClass('ocs-avatar-choice-selected', choice.data('ocsAvatarChoice') === selectedKey());
+    });
+    const addChoice = (key, label, path, detail = '') => {
+        const choice = $('<button type="button" class="ocs-avatar-choice"></button>').data('ocsAvatarChoice', key);
+        const previewPath = path ?? originalAvatarPath(type);
+        choice.append($('<img alt="">').attr('src', previewPath), $('<span class="ocs-avatar-choice-label"></span>').text(label));
+        if (detail) choice.append($('<small></small>').text(detail));
+        choice.on('click', () => {
+            selected = key === '__original__' ? null : key;
+            renderSelected();
+        });
+        choices.append(choice);
+    };
+    addChoice('__original__', '原始头像', null, '不替换');
+    for (const path of versionAvatarGallery(type)) addChoice(path, avatarPathLabel(path), path);
+    root.append(choices);
+
+    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, '', {
+        wide: true,
+        leftAlign: true,
+        allowVerticalScrolling: true,
+        okButton: '保存头像',
+        cancelButton: '取消',
+    });
+    popup.dlg.classList.add('ocs-dialog');
+    renderSelected();
+    if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return;
+
+    // Keep an explicit null for “原始头像”: it makes the next version apply
+    // clear AvatarCropper's corresponding theme binding as well.
+    if (!selected) version.avatarPath = null;
+    else version.avatarPath = selected;
+    version.updatedAt = Date.now();
+    if (versionContext(type).current?.id === version.id) {
+        syncVersionAvatarToGallery(type, version);
+        refreshVersionAvatarOverrides();
+    }
+    toastr.success(`已保存“${version.name}”的版本头像`, '一键快照');
+    saveSettingsDebounced();
 }
 
 async function openVersionManager(type) {
@@ -2290,6 +2501,7 @@ async function openVersionManager(type) {
                     actions.append($('<button class="ocs-button ocs-primary">更新</button>').on('click', async () => { await updateCurrentVersion(type); render(); }));
                 }
                 actions.append($('<button class="ocs-button">展开编辑</button>').on('click', async () => { await openVersionDescriptionEditor(type, version); render(); }));
+                actions.append($('<button class="ocs-button">头像</button>').on('click', async () => { await openVersionAvatarPicker(type, version); render(); }));
                 actions.append($('<button class="ocs-button">应用</button>').on('click', async () => { await applyVersion(type, version.id); render(); }));
                 actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameVersion(type, version.id); render(); }));
                 actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setVersionGroup(type, version.id); render(); }));
@@ -3156,6 +3368,8 @@ $(async () => {
     if (syncStoredSnapshotVersionNames()) saveSettingsDebounced();
     installThemeRenameObserver();
     setTimeout(installThemeRenameObserver, 1000);
+    installAvatarGallerySelectionObserver();
+    setTimeout(installAvatarGallerySelectionObserver, 1000);
     registerQrAssistantShortcut();
     installQrShortcut();
     installVersionMenu();

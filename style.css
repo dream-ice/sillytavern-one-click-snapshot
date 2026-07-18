@@ -187,9 +187,24 @@
 .ocs-version-card > summary strong { min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
 .ocs-version-card > summary small { margin-left: auto; opacity: .65; font-size: .72em; white-space: nowrap; }
 .ocs-version-preview { margin-top: 9px; padding: 8px 9px; border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); }
+.ocs-version-avatar-state { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 7px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); font-size: .78em; }
+.ocs-version-avatar-state > span { color: var(--SmartThemeQuoteColor, #9cc); }
+.ocs-version-avatar-state > strong { min-width: 0; overflow: hidden; font-weight: 500; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .ocs-version-preview-label { margin-bottom: 4px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; }
 .ocs-version-preview p { display: -webkit-box; margin: 0; overflow: hidden; font-size: .9em; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 4; white-space: pre-wrap; }
 .ocs-version-change-state { margin-top: 8px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .82em; }
+.ocs-avatar-picker { width: min(700px, 100%); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
+.ocs-avatar-picker header { margin: 0 0 11px; padding-bottom: 9px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
+.ocs-avatar-picker h3 { margin: 3px 0 0; font-size: 1.18em; }
+.ocs-avatar-picker header p { margin: 5px 0 0; opacity: .72; font-size: .84em; line-height: 1.45; }
+.ocs-avatar-picker-note { margin: 0 0 10px; padding: 7px 9px; border-left: 2px solid var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 10%, transparent); font-size: .82em; line-height: 1.45; }
+.ocs-avatar-choice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 8px; max-height: min(55dvh, 510px); padding: 2px; overflow: auto; }
+.ocs-avatar-choice { display: grid !important; grid-template-rows: 82px auto auto; align-content: start; min-width: 0; padding: 5px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 80%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 15%, transparent); color: inherit; cursor: pointer; font: inherit; text-align: left; }
+.ocs-avatar-choice:hover { border-color: var(--SmartThemeQuoteColor, #9cc); }
+.ocs-avatar-choice.ocs-avatar-choice-selected { border-color: var(--SmartThemeQuoteColor, #9cc); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 52%, transparent); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 12%, var(--SmartThemeBlurTintColor, #111)); }
+.ocs-avatar-choice img { width: 100%; height: 82px; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 38%, transparent); object-fit: cover; }
+.ocs-avatar-choice-label { display: block; margin-top: 6px; overflow: hidden; font-size: .78em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
+.ocs-avatar-choice small { display: block; margin-top: 2px; overflow: hidden; opacity: .62; font-size: .66em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .ocs-version-editor-popup { width: min(680px, 100%); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
 .ocs-version-editor-popup header { margin: 0 0 11px; padding-bottom: 9px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
 .ocs-version-editor-popup h3 { margin: 3px 0 0; font-size: 1.18em; }
@@ -255,5 +270,7 @@
     .ocs-content-drawer-body { margin-left: 2px; padding-left: 6px; }
     .ocs-content-items { font-size: .94em; }
     .ocs-version-switch-popup { width: 100%; max-width: 100%; }
+    .ocs-avatar-picker { width: 100%; max-width: 100%; }
+    .ocs-avatar-choice-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .ocs-version-edit-label textarea { min-height: 50dvh; }
 }
