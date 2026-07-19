@@ -187,9 +187,9 @@
 .ocs-version-card > summary strong { min-width: 0; overflow-wrap: anywhere; font-size: .92em; }
 .ocs-version-card > summary small { margin-left: auto; opacity: .65; font-size: .72em; white-space: nowrap; }
 .ocs-version-preview { margin-top: 9px; padding: 8px 9px; border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); }
-.ocs-version-avatar-state { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 0 0 7px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); font-size: .78em; }
+.ocs-version-avatar-state { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 7px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); font-size: .78em; }
 .ocs-version-avatar-state > span { color: var(--SmartThemeQuoteColor, #9cc); }
-.ocs-version-avatar-state > strong { min-width: 0; overflow: hidden; font-weight: 500; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.ocs-version-avatar-thumbnail { display: block; width: 26px; height: 26px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 75%, transparent); border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 38%, transparent); object-fit: cover; }
 .ocs-version-preview-label { margin-bottom: 4px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; }
 .ocs-version-preview p { display: -webkit-box; margin: 0; overflow: hidden; font-size: .9em; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 4; white-space: pre-wrap; }
 .ocs-version-change-state { margin-top: 8px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .82em; }

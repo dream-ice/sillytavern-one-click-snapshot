@@ -201,10 +201,6 @@ function avatarPathLabel(path) {
     try { return decodeURIComponent(filename); } catch { return filename; }
 }
 
-function versionAvatarStateLabel(version) {
-    return version.avatarPath ? avatarPathLabel(version.avatarPath) : '原生头像';
-}
-
 function currentAvatarGalleryTheme() {
     return String(document.getElementById('themes')?.value ?? 'default');
 }
@@ -2379,7 +2375,12 @@ async function openVersionDescriptionEditor(type, version) {
 function versionPreview(type, version) {
     const preview = $('<div class="ocs-version-preview"></div>');
     const content = getVersionDescription(type, version);
-    preview.append($('<div class="ocs-version-avatar-state"></div>').append($('<span></span>').text('头像'), $('<strong></strong>').text(versionAvatarStateLabel(version))));
+    const avatarPath = version.avatarPath || originalAvatarPath(type);
+    const avatarTitle = version.avatarPath ? '版本头像' : '原生头像';
+    preview.append($('<div class="ocs-version-avatar-state"></div>').append(
+        $('<span></span>').text('头像'),
+        $('<img class="ocs-version-avatar-thumbnail" alt="">').attr({ src: avatarPath, title: avatarTitle }),
+    ));
     preview.append($('<div class="ocs-version-preview-label"></div>').text(type === 'character' ? '角色描述' : '用户描述'));
     preview.append($('<p></p>').text(content || '（空白描述）'));
     return preview;
