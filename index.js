@@ -25,6 +25,7 @@ import { getCharaFilename } from '../../../utils.js';
 import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
 import { getChatCompletionModel, selected_proxy, settingsToUpdate } from '../../../openai.js';
+import { SECRET_KEYS, rotateSecret, secret_state } from '../../../secrets.js';
 import { getConnectedPersonas, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallowScopedScripts, getCurrentPresetAPI, getCurrentPresetName, getScriptsByType, isPresetScriptsAllowed, isScopedScriptsAllowed, saveScriptsByType, SCRIPT_TYPES } from '../../regex/engine.js';
@@ -75,9 +76,11 @@ const API_TEMPLATE_TYPES = ['context', 'instruct', 'sysprompt', 'reasoning'];
 const API_MAIN_LABELS = {
     openai: '聊天补全',
 };
-// Connection endpoints and all credentials deliberately stay out of a
-// snapshot. These keys only describe an already-configured provider, model,
-// or public runtime toggle.
+// Connection endpoints normally stay out of a snapshot. Custom
+// (OpenAI-compatible) is the one exception: unlike the native sources it has
+// no proxy-preset file to represent its endpoint, so its URL and the active
+// native secret reference belong together. The secret value itself is never
+// copied into extension settings.
 const OPENAI_API_SETTING_KEYS = new Set([
     'chat_completion_source',
     'openai_model', 'claude_model', 'openrouter_model', 'ai21_model', 'mistralai_model', 'cohere_model', 'perplexity_model',
@@ -630,6 +633,9 @@ function capturePreset() {
         : [];
     return {
         api: main_api,
+        // Keep the native value only as a legacy fallback. For completion
+        // presets it is commonly a mutable list index, so presetName is the
+        // authoritative reference when applying a snapshot.
         presetValue: manager?.getSelectedPreset() ?? null,
         presetName: manager?.getSelectedPresetName() ?? '未选择预设',
         // A snapshot is a set of switches, not a copy of a preset. The
@@ -701,6 +707,27 @@ function capturePresetReference(apiId) {
     };
 }
 
+function captureCustomConnection(settings) {
+    const connection = { url: String(settings.custom_url ?? '') };
+    const activeSecret = Array.isArray(secret_state[SECRET_KEYS.CUSTOM])
+        ? secret_state[SECRET_KEYS.CUSTOM].find(secret => secret.active)
+        : null;
+    if (activeSecret?.id) {
+        // The immutable ID is the actual reference; the label is display-only
+        // so renaming a secret naturally updates what this snapshot shows.
+        connection.secret = { id: activeSecret.id, label: String(activeSecret.label ?? '') };
+    }
+    return connection;
+}
+
+function customSecretLabel(reference) {
+    if (!reference?.id) return '';
+    const liveSecret = Array.isArray(secret_state[SECRET_KEYS.CUSTOM])
+        ? secret_state[SECRET_KEYS.CUSTOM].find(secret => secret.id === reference.id)
+        : null;
+    return String(liveSecret?.label || reference.label || reference.id);
+}
+
 function captureApiState() {
     const state = {
         // This scope intentionally represents SillyTavern's Chat Completion
@@ -725,6 +752,11 @@ function captureApiState() {
         // preset store and are never copied into a snapshot.
         proxyPreset: String($('#openai_proxy_preset').val() ?? selected_proxy?.name ?? 'None'),
     };
+    if (values.chat_completion_source === 'custom') {
+        state.chatCompletion.customConnection = captureCustomConnection(settings);
+        // Custom does not use SillyTavern's OpenAI reverse-proxy presets.
+        delete state.chatCompletion.proxyPreset;
+    }
     return state;
 }
 
@@ -783,6 +815,41 @@ function applyOpenAIConnectionState(values) {
     return changed;
 }
 
+async function applyCustomConnection(connection) {
+    if (!connection || typeof connection !== 'object') return false;
+    const settings = SillyTavern.getContext().chatCompletionSettings;
+    if (!settings) return false;
+    let changed = false;
+
+    let secretRotated = false;
+    if (Object.hasOwn(connection, 'url') && !presetParametersEqual(settings.custom_url, connection.url)) {
+        settings.custom_url = String(connection.url ?? '');
+        $('#custom_api_url_text').val(settings.custom_url).trigger('input', { source: 'snapshot' });
+        changed = true;
+    }
+    // Switch the native active secret by its stable ID. Its value stays in
+    // SillyTavern's secret store and is never read, copied, or displayed here.
+    if (connection.secret?.id) {
+        const secrets = Array.isArray(secret_state[SECRET_KEYS.CUSTOM]) ? secret_state[SECRET_KEYS.CUSTOM] : [];
+        const target = secrets.find(secret => secret.id === connection.secret.id);
+        if (!target) {
+            toastr.warning(`找不到自定义 API 密钥“${connection.secret.label || connection.secret.id}”，已保留当前密钥。`, '一键快照');
+        } else if (!target.active) {
+            await rotateSecret(SECRET_KEYS.CUSTOM, target.id);
+            changed = true;
+            secretRotated = true;
+        }
+    }
+    if (changed) {
+        saveSettingsDebounced();
+        // rotateSecret triggers a native main-API refresh itself. If the
+        // secret was already active, refresh once after changing the URL so
+        // the model list and connection indicator use the final endpoint.
+        if (!secretRotated) $('#api_button_openai').trigger('click');
+    }
+    return changed;
+}
+
 function applyProxyPreset(name) {
     if (!name) return false;
     const select = $('#openai_proxy_preset');
@@ -812,8 +879,11 @@ async function applyApiState(state) {
     // status check. Apply the proxy first, then change the source: the source
     // handler cancels that earlier check and reconnects once with the final
     // proxy/source pair instead of leaving two checks racing for the status.
-    changed = applyProxyPreset(state.chatCompletion.proxyPreset) || changed;
+    // Custom has no proxy-preset backing file, so never touch that control.
+    const source = state.chatCompletion.values?.chat_completion_source;
+    if (source !== 'custom') changed = applyProxyPreset(state.chatCompletion.proxyPreset) || changed;
     changed = applyOpenAIConnectionState(state.chatCompletion.values) || changed;
+    if (source === 'custom') changed = (await applyCustomConnection(state.chatCompletion.customConnection)) || changed;
     for (const type of API_TEMPLATE_TYPES) {
         changed = (await selectPresetReference(type, state.templates?.[type])) || changed;
     }
@@ -825,7 +895,12 @@ function apiStateLines(state) {
     const lines = [`主 API：${API_MAIN_LABELS.openai}`];
     if (state.chatCompletion?.values?.chat_completion_source) lines.push(`聊天补全来源：${state.chatCompletion.values.chat_completion_source}`);
     if (state.chatCompletion?.model) lines.push(`模型：${state.chatCompletion.model}`);
-    if (state.chatCompletion?.proxyPreset && state.chatCompletion.proxyPreset !== 'None') lines.push(`代理预设：${state.chatCompletion.proxyPreset}`);
+    const source = state.chatCompletion?.values?.chat_completion_source;
+    if (source === 'custom' && state.chatCompletion?.customConnection?.url) lines.push(`自定义地址：${state.chatCompletion.customConnection.url}`);
+    if (source === 'custom' && state.chatCompletion?.customConnection?.secret?.id) {
+        lines.push(`密钥：${customSecretLabel(state.chatCompletion.customConnection.secret)}`);
+    }
+    if (source !== 'custom' && state.chatCompletion?.proxyPreset && state.chatCompletion.proxyPreset !== 'None') lines.push(`代理预设：${state.chatCompletion.proxyPreset}`);
     const templateLabels = { context: '上下文模板', instruct: '指令模板', sysprompt: '系统提示词', reasoning: '推理格式' };
     for (const type of API_TEMPLATE_TYPES) {
         if (state.templates?.[type]?.name) lines.push(`${templateLabels[type]}：${state.templates[type].name}`);
@@ -1257,23 +1332,48 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
     }
 }
 
+function snapshotPresetValue(manager, state) {
+    if (!manager || !state) return { found: false, value: null };
+    const select = $(manager.select);
+    const name = String(state.presetName ?? '').trim();
+    // Completion-preset option values are often array indexes. Preset
+    // Transfer can reorder those indexes, while the visible preset name still
+    // identifies the intended preset. Never use an old index when a saved
+    // name exists but no longer resolves: selecting an unrelated preset is
+    // worse than safely skipping this snapshot scope.
+    if (name && name !== '未选择预设') {
+        const option = select.find('option').filter((_, item) => String($(item).text()) === name).first();
+        return option.length ? { found: true, value: option.val() } : { found: false, value: null };
+    }
+    // Very old snapshots did not store a name. Keep their legacy behavior,
+    // but only if that exact option value still exists in the live selector.
+    if (state.presetValue === null || state.presetValue === undefined) return { found: false, value: null };
+    const option = select.find('option').filter((_, item) => String($(item).val()) === String(state.presetValue)).first();
+    return option.length ? { found: true, value: option.val() } : { found: false, value: null };
+}
+
 async function applyPreset(state) {
     if (!state || state.api !== main_api) return;
     const manager = getPresetManager();
     const selectedValue = manager?.getSelectedPreset?.();
-    const samePreset = state.presetValue !== null
-        && state.presetValue !== undefined
+    const targetPreset = snapshotPresetValue(manager, state);
+    if (manager && !targetPreset.found) {
+        const label = String(state.presetName ?? '').trim();
+        toastr.warning(label ? `找不到预设“${label}”，已跳过预设快照。` : '找不到快照中的预设，已跳过预设快照。', '一键快照');
+        return false;
+    }
+    const samePreset = targetPreset.found
         && selectedValue !== null
         && selectedValue !== undefined
-        && String(selectedValue) === String(state.presetValue);
-    if (manager && state.presetValue !== null && state.presetValue !== undefined && !samePreset) {
+        && String(selectedValue) === String(targetPreset.value);
+    if (manager && targetPreset.found && !samePreset) {
         // Selecting a preset starts an asynchronous native load. Waiting for
         // it is essential: otherwise that load writes the preset file's old
         // prompt_order over the snapshot state we just restored.
         const presetLoaded = main_api === 'openai'
             ? new Promise(resolve => eventSource.once(event_types.OAI_PRESET_CHANGED_AFTER, resolve))
             : null;
-        manager.selectPreset(state.presetValue);
+        manager.selectPreset(targetPreset.value);
         if (presetLoaded) await presetLoaded;
     }
     // Do this after selecting the preset: native selection loads its current
@@ -3149,21 +3249,29 @@ function renderQrShortcut() {
     const existing = document.getElementById('one_click_snapshot_qr');
     const bar = document.getElementById('qr--bar');
     if (!bar) return;
-    if (existing && existing.closest('#qr--bar') === bar) return;
+    const isCombined = window.quickReplyApi?.settings?.isCombined === true;
+    const holder = isCombined
+        ? Array.from(bar.children).find(element => element.classList.contains('qr--buttons')) ?? bar
+        : bar;
+    // The old implementation wrapped this button in its own .qr--buttons.
+    // Do not leave that legacy wrapper behind after an extension hot reload or
+    // a switch between QR layouts: it carries the full-width group styling.
+    if (existing?.parentElement === holder) return;
+    const legacyGroup = existing?.closest('.ocs-qr-shortcut-set');
     existing?.remove();
+    if (legacyGroup?.childElementCount === 0) legacyGroup.remove();
 
-    // Quick Reply renders groups as .qr--buttons. Keeping this tiny isolated
-    // group makes the injected action inherit QR's native colors, density,
-    // icon/label behavior, and does not mutate any user-created QR set.
-    const group = document.createElement('div');
-    group.className = 'qr--buttons ocs-qr-shortcut-set';
+    // In combined QR mode, native sets share one .qr--buttons holder. Put the
+    // actual button directly in it. In non-combined mode it stays a direct
+    // #qr--bar child, which is the shape QR Assistant expects for a registered
+    // third-party button (rather than a full-width native QR set).
     const button = document.createElement('div');
     button.id = 'one_click_snapshot_qr';
     button.className = 'qr--button menu_button';
     button.title = '打开一键快照';
     button.setAttribute('role', 'button');
     button.setAttribute('tabindex', '0');
-    button.innerHTML = '<div class="qr--button-icon fa-solid fa-camera"></div><div class="qr--button-label">一键快照</div>';
+    button.innerHTML = '<div class="qr--button-label">一键快照</div>';
     button.addEventListener('click', openSnapshotPopup);
     button.addEventListener('keydown', event => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -3171,8 +3279,7 @@ function renderQrShortcut() {
             openSnapshotPopup();
         }
     });
-    group.append(button);
-    bar.append(group);
+    holder.append(button);
     window.quickReplyMenu?.applyWhitelistDOMChanges?.();
 }
 

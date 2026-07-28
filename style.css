@@ -25,9 +25,8 @@
     padding: 0 0 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #777);
 }
-/* This is intentionally a normal QR button, not a persisted QR preset. */
-#qr--bar > .ocs-qr-shortcut-set { flex: 0 0 auto; width: auto; }
-#qr--bar > .ocs-qr-shortcut-set .qr--button { min-width: max-content; }
+/* In QR's non-combined mode this is a third-party atom, never a full QR set. */
+#qr--bar > #one_click_snapshot_qr { flex: 0 0 auto; width: auto; min-width: max-content; }
 
 .ocs-popup h3,
 .ocs-version-popup h3,
