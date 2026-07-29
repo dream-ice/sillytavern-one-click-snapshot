@@ -2821,9 +2821,31 @@ async function renameSnapshot(snapshot) {
 }
 
 async function setSnapshotGroup(snapshot) {
-    const group = await Popup.show.input('移动到分组', '输入分组名称；留空可移到“未分组”。', snapshot.group ?? '');
-    if (group === null) return;
-    snapshot.group = group.trim();
+    const groups = [...new Set([
+        ...settings().snapshotGroups,
+        ...settings().snapshots.map(item => String(item.group ?? '').trim()),
+    ].filter(Boolean))];
+    const root = $('<div class="ocs-group-picker"></div>');
+    root.append('<p>选择一个已有分组，或在下方输入新名称。</p>');
+    const select = $('<select class="text_pole ocs-group-picker-select"></select>');
+    select.append('<option value="">未分组</option>');
+    for (const group of groups) select.append($('<option></option>').val(group).text(group));
+    select.val(String(snapshot.group ?? ''));
+    const newGroup = $('<input class="text_pole ocs-group-picker-new" type="text" placeholder="输入新分组名称">');
+    select.on('change', () => newGroup.val(''));
+    root.append(
+        $('<label class="ocs-group-picker-select-label">已有分组</label>').append(select),
+        $('<label class="ocs-group-picker-new-label">新建分组</label>').append(newGroup),
+    );
+    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, '移动到分组', {
+        wide: false,
+        leftAlign: true,
+        okButton: '确认移动',
+        cancelButton: '取消',
+    });
+    popup.dlg.classList.add('ocs-dialog');
+    if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return;
+    snapshot.group = String(newGroup.val() ?? '').trim() || String(select.val() ?? '');
     if (snapshot.group && !settings().snapshotGroups.includes(snapshot.group)) settings().snapshotGroups.push(snapshot.group);
     pruneSnapshotGroups();
     snapshot.updatedAt = Date.now();

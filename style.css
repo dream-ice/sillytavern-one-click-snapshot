@@ -100,6 +100,12 @@
 .ocs-scope-source-picker { display: grid; gap: 8px; min-width: min(310px, 78vw); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
 .ocs-scope-source-picker p { margin: 0; opacity: .74; font-size: .86em; line-height: 1.4; }
 .ocs-scope-source-choices { display: grid; gap: 3px; padding: 3px 0; }
+.ocs-group-picker { display: grid; gap: 10px; width: min(420px, 100%); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
+.ocs-group-picker p { margin: 0; opacity: .72; font-size: .86em; line-height: 1.4; }
+.ocs-group-picker-select-label,
+.ocs-group-picker-new-label { display: grid; gap: 5px; margin: 2px 0 0; font-size: .84em; }
+.ocs-group-picker-select,
+.ocs-group-picker-new { box-sizing: border-box; width: 100%; min-width: 0; }
 .ocs-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
 .ocs-card-actions .ocs-button { min-height: 28px; padding: 4px 7px; font-size: .72em; }
 .ocs-empty { padding: 12px 2px; opacity: .68; font-size: .85em; }
