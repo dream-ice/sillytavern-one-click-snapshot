@@ -329,13 +329,15 @@ function captureCharacter() {
     // whole data object here used to make an old character version silently
     // resurrect deleted scripts (or discard newly imported ones).
     if (data.extensions) delete data.extensions.regex_scripts;
+    // Opening greetings are a card-level catalog with its own binding system.
+    // A role version is never allowed to archive or replace that catalog.
+    delete data.alternate_greetings;
     return {
         avatar: character.avatar,
         name: character.name,
         description: character.description ?? '',
         personality: character.personality ?? '',
         scenario: character.scenario ?? '',
-        first_mes: character.first_mes ?? '',
         mes_example: character.mes_example ?? '',
         talkativeness: character.talkativeness,
         data,
@@ -1186,16 +1188,51 @@ async function applyRegex(state) {
     }
 }
 
-async function applyCharacter(state, versionId = null, { persist = true, preserveGreetingCatalog = false } = {}) {
+function captureGreetingCatalog(character = currentCharacter()) {
+    if (!character) return null;
+    const data = character.data ?? {};
+    return {
+        hasFirstMes: Object.hasOwn(character, 'first_mes'),
+        firstMes: character.first_mes,
+        hasAlternateGreetings: Object.hasOwn(data, 'alternate_greetings'),
+        alternateGreetings: deepClone(data.alternate_greetings ?? []),
+    };
+}
+
+function restoreGreetingCatalog(catalog, character = currentCharacter()) {
+    if (!catalog || !character) return false;
+    let changed = false;
+    if (catalog.hasFirstMes) {
+        if (character.first_mes !== catalog.firstMes) {
+            character.first_mes = catalog.firstMes;
+            changed = true;
+        }
+    } else if (Object.hasOwn(character, 'first_mes')) {
+        delete character.first_mes;
+        changed = true;
+    }
+    character.data ??= {};
+    if (catalog.hasAlternateGreetings) {
+        if (!presetParametersEqual(character.data.alternate_greetings, catalog.alternateGreetings)) {
+            character.data.alternate_greetings = deepClone(catalog.alternateGreetings);
+            changed = true;
+        }
+    } else if (Object.hasOwn(character.data, 'alternate_greetings')) {
+        delete character.data.alternate_greetings;
+        changed = true;
+    }
+    if (changed) select_selected_character(this_chid, { switchMenu: false });
+    return changed;
+}
+
+async function applyCharacter(state, versionId = null, { persist = true, preserveGreetingCatalog = true, greetingCatalog = null } = {}) {
     const character = currentCharacter();
     if (!state || !character) return;
     if (state.avatar !== character.avatar) {
         toastr.warning(`“${state.name}”不是当前角色，已跳过角色版本。`, '一键快照');
         return;
     }
-    const currentFirstMes = character.first_mes;
-    const hasAlternateGreetings = Array.isArray(character.data?.alternate_greetings);
-    const currentAlternateGreetings = deepClone(character.data?.alternate_greetings ?? []);
+    const liveGreetingCatalog = preserveGreetingCatalog ? (greetingCatalog ?? captureGreetingCatalog(character)) : null;
     const currentExtensions = character.data?.extensions ?? {};
     const hasCurrentScopedRegex = Object.hasOwn(currentExtensions, 'regex_scripts');
     const currentScopedRegex = deepClone(currentExtensions.regex_scripts);
@@ -1208,20 +1245,24 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
     if (hasCurrentScopedRegex) data.extensions.regex_scripts = currentScopedRegex;
     data.extensions.one_click_snapshot = { versionId };
     if (preserveGreetingCatalog) {
-        if (hasAlternateGreetings) data.alternate_greetings = currentAlternateGreetings;
+        if (liveGreetingCatalog?.hasAlternateGreetings) data.alternate_greetings = deepClone(liveGreetingCatalog.alternateGreetings);
         else delete data.alternate_greetings;
     }
     if (versionId) settings().activeCharacterVersions[character.avatar] = versionId;
     else delete settings().activeCharacterVersions[character.avatar];
-    Object.assign(character, {
+    const characterUpdate = {
         description: state.description,
         personality: state.personality,
         scenario: state.scenario,
-        first_mes: preserveGreetingCatalog ? currentFirstMes : state.first_mes,
         mes_example: state.mes_example,
         talkativeness: state.talkativeness,
         data,
-    });
+    };
+    // Do not even assign this field while preserving. Omitting it prevents an
+    // incomplete or legacy version object from turning a live greeting into
+    // undefined before the safety restore runs.
+    if (!preserveGreetingCatalog) characterUpdate.first_mes = state.first_mes;
+    Object.assign(character, characterUpdate);
     select_selected_character(this_chid, { switchMenu: false });
     if (persist) {
         // SillyTavern rebuilds chat[0] from first_mes and alternate_greetings
@@ -1595,7 +1636,7 @@ function snapshotCanBindCurrentChat(snapshot, { notify = false, allowUserChange 
     return false;
 }
 
-async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = false, excludeChatWorldbook = false, persistCharacter = true, preserveGreetingCatalog = false, allowThemeOverride = false } = {}) {
+async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = false, excludeChatWorldbook = false, persistCharacter = true, allowThemeOverride = false } = {}) {
     if (!snapshot || applying) return false;
     const compatibility = applyCompatibility(snapshot, { allowThemeOverride });
     const incompatible = [];
@@ -1620,6 +1661,12 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
     if (compatibility.chatMismatch) excludedSources.add('聊天世界书');
     if (excludeChatWorldbook) excludedSources.add('聊天世界书');
 
+    // Automatic chat, role-default, and opening-greeting bindings must never
+    // treat a role version as the source of truth for the card's greeting
+    // catalog. Keep a full copy for the whole application, not just the
+    // character-version assignment: native preset/regex reloads can happen
+    // afterwards and used to leave an old version's empty first_mes in memory.
+    const liveGreetingCatalog = captureGreetingCatalog();
     applying = true;
     try {
         const payload = snapshot.payload ?? {};
@@ -1628,7 +1675,13 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         // applications as well as automatic bindings, otherwise an older
         // version could silently overwrite (or remove) the first greeting
         // just before regex forces a chat reload.
-        if (snapshot.scopes?.character && !compatibility.characterMismatch) await applySnapshotCharacterVersion(payload.character, { persist: persistCharacter, preserveGreetingCatalog: true });
+        if (snapshot.scopes?.character && !compatibility.characterMismatch) {
+            await applySnapshotCharacterVersion(payload.character, {
+                persist: persistCharacter,
+                preserveGreetingCatalog: true,
+                greetingCatalog: liveGreetingCatalog,
+            });
+        }
         if (snapshot.scopes?.persona && !compatibility.personaMismatch) await applySnapshotPersonaVersion(payload.persona);
         if (snapshot.scopes?.theme && !compatibility.themeMismatch) await applyTheme(payload.theme);
         if (snapshot.scopes?.worldInfo) await applyWorldInfo(payload.worldInfo, { excludedSources });
@@ -1649,6 +1702,10 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         toastr.error(`应用失败：${error.message}`, '一键快照');
         return false;
     } finally {
+        // Reassert after every scope has finished (or after a partial failure).
+        // This is deliberately in-memory only: automatic bindings must not
+        // save a changed card.
+        restoreGreetingCatalog(liveGreetingCatalog);
         applying = false;
     }
 }
