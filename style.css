@@ -110,9 +110,34 @@
 .ocs-card-actions .ocs-button { min-height: 28px; padding: 4px 7px; font-size: .72em; }
 .ocs-empty { padding: 12px 2px; opacity: .68; font-size: .85em; }
 .ocs-greeting-choice { display: grid; gap: 9px; min-width: min(420px, 78vw); }
+.ocs-greeting-choice-groups { display: grid; gap: 5px; }
+.ocs-greeting-choice-group-title { font-size: .9em; }
+.ocs-greeting-choice-group-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.ocs-greeting-choice-group-tag { margin: 0; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 78%, transparent); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: .8em; line-height: 1.25; opacity: .76; }
+.ocs-greeting-choice-group-tag:hover { border-color: var(--SmartThemeQuoteColor, #9cc); color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
+.ocs-greeting-choice-group-tag.is-active { border-color: var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 16%, transparent); color: var(--SmartThemeQuoteColor, inherit); opacity: 1; }
 .ocs-greeting-choice-label { display: grid; gap: 5px; font-size: .9em; }
 .ocs-greeting-choice-label select { width: 100%; min-width: 0; }
 .ocs-greeting-choice-preview { max-height: 12em; margin: 0; padding: 8px 9px; overflow: auto; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); font-size: .84em; line-height: 1.45; white-space: pre-wrap; }
+.ocs-native-greeting-toolbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin: 7px 0 3px; }
+.ocs-native-greeting-toolbar :is(select, input) { box-sizing: border-box; min-width: 0; margin: 0; }
+.ocs-native-greeting-filter-search { flex: 1 1 auto; width: auto !important; }
+.ocs-native-greeting-filter-group { flex: 0 1 154px; width: 154px !important; }
+.ocs-native-greeting-toolbar .menu_button { flex: 0 0 auto; min-width: 30px; margin: 0; }
+.ocs-native-greeting-batch-only { display: none !important; }
+.ocs-greeting-batch-mode .ocs-native-greeting-batch-only { display: flex !important; }
+.ocs-native-greeting-select { display: none !important; flex: 0 0 auto; min-width: 25px !important; margin: 0 5px 0 0 !important; cursor: pointer; }
+.ocs-greeting-batch-mode .ocs-native-greeting-select { display: flex !important; }
+.ocs-native-greeting-select.is-selected { color: var(--SmartThemeQuoteColor, inherit); }
+.ocs-native-greeting-drag-handle { display: none !important; cursor: grab; }
+.ocs-greeting-drag-mode .ocs-native-greeting-drag-handle { display: flex !important; }
+.ocs-greeting-drag-mode .alternate_greeting { cursor: default; }
+.ocs-greeting-drag-mode .alternate_greeting.ui-sortable-helper { opacity: .78; }
+.ocs-greeting-drag-mode .alternate_greeting.ui-sortable-placeholder { visibility: visible !important; min-height: 46px; border: 1px dashed var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 8%, transparent); }
+.ocs-native-greeting-drag-toggle.active,
+.ocs-native-greeting-batch.active { color: var(--SmartThemeQuoteColor, inherit); }
+.ocs-native-greeting-number { margin-left: 3px; opacity: .5; font-size: .76em; font-weight: 400; }
+.ocs-native-greeting-group-badge { max-width: 12em; margin-left: 2px; padding: 1px 5px; overflow: hidden; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 36%, transparent); color: var(--SmartThemeQuoteColor, inherit); font-size: .7em; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 
 .ocs-contents-popup { max-width: 680px; text-align: left !important; }
 .ocs-dialog .ocs-contents-popup,

@@ -21,7 +21,7 @@ import {
 } from '../../../../script.js';
 import { extension_settings, saveMetadataDebounced } from '../../../extensions.js';
 import { getWorldInfoSettings, loadWorldInfo, onWorldInfoChange, saveWorldInfo, world_names } from '../../../world-info.js';
-import { getCharaFilename } from '../../../utils.js';
+import { getCharaFilename, getSortableDelay } from '../../../utils.js';
 import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
 import { getChatCompletionModel, selected_proxy, settingsToUpdate } from '../../../openai.js';
@@ -46,6 +46,9 @@ let observedThemeSelect = null;
 const observedThemeOptionNames = new WeakMap();
 let avatarGalleryStyleObserver = null;
 let observedAvatarGalleryStyle = null;
+let greetingCatalogObserver = null;
+let greetingCatalogDecorateQueued = false;
+let greetingCatalogDecorateDeferred = false;
 
 const deepClone = value => value === undefined ? undefined : structuredClone(value);
 const makeId = () => globalThis.crypto?.randomUUID?.() ?? `ocs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -332,6 +335,9 @@ function captureCharacter() {
     // Opening greetings are a card-level catalog with its own binding system.
     // A role version is never allowed to archive or replace that catalog.
     delete data.alternate_greetings;
+    // Names and groups are card-level metadata too. Do not let a saved role
+    // version freeze an old copy that could overwrite a later reorganisation.
+    delete data.extensions?.one_click_snapshot;
     return {
         avatar: character.avatar,
         name: character.name,
@@ -1236,6 +1242,7 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
     const currentExtensions = character.data?.extensions ?? {};
     const hasCurrentScopedRegex = Object.hasOwn(currentExtensions, 'regex_scripts');
     const currentScopedRegex = deepClone(currentExtensions.regex_scripts);
+    const currentSnapshotExtension = deepClone(currentExtensions.one_click_snapshot ?? {});
     const data = deepClone(state.data ?? {});
     data.extensions ??= {};
     // Older saved versions may still contain regex_scripts. Always keep the
@@ -1243,7 +1250,7 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
     // that data and must not be overwritten by a character-version switch.
     delete data.extensions.regex_scripts;
     if (hasCurrentScopedRegex) data.extensions.regex_scripts = currentScopedRegex;
-    data.extensions.one_click_snapshot = { versionId };
+    data.extensions.one_click_snapshot = { ...currentSnapshotExtension, versionId };
     if (preserveGreetingCatalog) {
         if (liveGreetingCatalog?.hasAlternateGreetings) data.alternate_greetings = deepClone(liveGreetingCatalog.alternateGreetings);
         else delete data.alternate_greetings;
@@ -2004,17 +2011,77 @@ function greetingFingerprint(text) {
     return `${value.length}:${(hash >>> 0).toString(36)}`;
 }
 
-function greetingCandidates(character = currentCharacter()) {
-    if (!character) return [];
-    const greetings = [{ key: 'first', label: '主开场白', text: String(character.first_mes ?? '') }];
-    const alternates = Array.isArray(character.data?.alternate_greetings) ? character.data.alternate_greetings : [];
-    alternates.forEach((text, index) => greetings.push({ key: `alternate:${index}`, label: `备选开场白 ${index + 1}`, text: String(text ?? '') }));
+function greetingCatalogState(character = currentCharacter()) {
+    const state = deepClone(character?.data?.extensions?.one_click_snapshot?.greetingCatalog ?? {});
+    state.entries = Array.isArray(state.entries) ? state.entries : [];
+    return state;
+}
 
+function nativeGreetingEntries(character = currentCharacter()) {
+    if (!character) return [];
+    const entries = [{ key: 'first', kind: 'first', index: 0, fallbackLabel: '主开场白', text: String(character.first_mes ?? '') }];
+    const alternates = Array.isArray(character.data?.alternate_greetings) ? character.data.alternate_greetings : [];
+    alternates.forEach((text, index) => entries.push({
+        key: `alternate:${index}`,
+        kind: 'alternate',
+        index,
+        fallbackLabel: `备选开场白 ${index + 1}`,
+        text: String(text ?? ''),
+    }));
+    return entries;
+}
+
+function reconcileGreetingCatalog(catalog, character = currentCharacter()) {
+    const entries = nativeGreetingEntries(character);
+    catalog.entries = Array.isArray(catalog?.entries) ? catalog.entries : [];
+    const used = new Set();
+    for (const entry of entries) {
+        // The primary greeting is its own stable, native concept. Names and
+        // groups are intentionally only for alternate greetings.
+        if (entry.kind === 'first') continue;
+        const fingerprint = greetingFingerprint(entry.text);
+        // Prefer the recorded native position when text is duplicated. The
+        // move handler updates lastIndex before SillyTavern swaps the text,
+        // so identical greetings still keep their own names and groups.
+        let metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.fingerprint === fingerprint && item.lastIndex === entry.index && !used.has(item.id));
+        if (!metadata) metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.fingerprint === fingerprint && !used.has(item.id));
+        // A direct edit in SillyTavern changes the fingerprint but leaves the
+        // native position intact. Keep the user's name/group in that case.
+        if (!metadata && entry.kind === 'alternate') {
+            metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.lastIndex === entry.index && !used.has(item.id));
+        }
+        if (!metadata) {
+            metadata = { id: makeId(), kind: entry.kind, name: '', group: '' };
+            catalog.entries.push(metadata);
+        }
+        metadata.kind = entry.kind;
+        metadata.fingerprint = fingerprint;
+        metadata.lastIndex = entry.index;
+        metadata.name = String(metadata.name ?? '').trim();
+        metadata.group = String(metadata.group ?? '').trim();
+        metadata.collapsed = metadata.collapsed === true;
+        used.add(metadata.id);
+        entry.metadata = metadata;
+    }
+    // Deleted alternate greetings should not leave orphaned names behind to
+    // be accidentally reused by a future greeting in the same position.
+    catalog.entries = catalog.entries.filter(item => item?.kind === 'alternate' && used.has(item.id));
+    return entries;
+}
+
+function greetingDisplayLabel(entry) {
+    return entry?.metadata?.name || entry?.fallbackLabel || '未命名开场白';
+}
+
+function greetingCandidates(character = currentCharacter()) {
     // This order exactly follows SillyTavern's getFirstMessage(): when the
     // primary greeting is empty, it is removed before the swipe list exists.
-    const effective = greetings[0].text ? greetings : greetings.slice(1);
+    const greetings = reconcileGreetingCatalog(greetingCatalogState(character), character);
+    const effective = greetings[0]?.text ? greetings : greetings.slice(1);
     return effective.map((greeting, swipeIndex) => ({
         ...greeting,
+        label: greetingDisplayLabel(greeting),
+        group: greeting.metadata?.group || '',
         swipeIndex,
         fingerprint: greetingFingerprint(greeting.text),
     })).filter(greeting => greeting.text.trim());
@@ -2024,6 +2091,511 @@ function greetingLabelFromKey(key) {
     if (key === 'first') return '主开场白';
     const alternate = /^alternate:(\d+)$/.exec(String(key));
     return alternate ? `备选开场白 ${Number(alternate[1]) + 1}` : null;
+}
+
+function saveGreetingCatalogState(character, catalog) {
+    character.data ??= {};
+    character.data.extensions ??= {};
+    character.data.extensions.one_click_snapshot ??= {};
+    character.data.extensions.one_click_snapshot.greetingCatalog = deepClone(catalog);
+
+    // The native character form serializes its hidden JSON copy, rather than
+    // the live `characters[chid]` object. Patch only our metadata into that
+    // copy before following the native save path, so it reaches the card file
+    // without touching the greeting text or the other card fields.
+    const jsonInput = $('#character_json_data');
+    if (!jsonInput.length) return;
+    try {
+        const cardData = JSON.parse(String(jsonInput.val() ?? character.json_data ?? '{}'));
+        cardData.data ??= {};
+        cardData.data.extensions ??= {};
+        cardData.data.extensions.one_click_snapshot ??= {};
+        cardData.data.extensions.one_click_snapshot.greetingCatalog = deepClone(catalog);
+        jsonInput.val(JSON.stringify(cardData));
+    } catch (error) {
+        console.warn('[One-click Snapshot] Failed to prepare greeting catalog for native save.', error);
+    }
+}
+
+async function editGreetingMetadata(character, catalog, entry, field) {
+    const isName = field === 'name';
+    const value = isName
+        ? await Popup.show.input('重命名开场白', '名称只用于管理和快照绑定显示，不会改动开场白正文。', entry.metadata.name ?? '')
+        : await chooseGroup(entry.metadata.group, catalog.entries.map(item => String(item?.group ?? '').trim()), {
+            title: '设置开场白分组',
+            okButton: '确认分组',
+        });
+    if (value === null) return;
+    entry.metadata[field] = String(value).trim();
+    saveGreetingCatalogState(character, catalog);
+    scheduleNativeGreetingDecoration();
+}
+
+function updateNativeGreetingFilter(root, entries) {
+    const toolbar = root.find('.ocs-native-greeting-toolbar');
+    if (!toolbar.length) return;
+    const groupSelect = toolbar.find('.ocs-native-greeting-filter-group');
+    const search = toolbar.find('.ocs-native-greeting-filter-search');
+    const selectedGroup = String(groupSelect.val() ?? '__all__');
+    const groups = [...new Set(entries.map(entry => entry.metadata?.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    groupSelect.empty().append('<option value="__all__">全部分组</option><option value="">未分组</option>');
+    for (const group of groups) groupSelect.append($('<option></option>').val(group).text(group));
+    groupSelect.val([...groupSelect.find('option').map((_, option) => option.value)].includes(selectedGroup) ? selectedGroup : '__all__');
+    const query = String(search.val() ?? '').trim().toLocaleLowerCase();
+    root.find('.alternate_greeting').each((_, node) => {
+        const block = $(node);
+        const index = Number(block.attr('data-index'));
+        const entry = entries.find(item => item.index === index);
+        const inGroup = selectedGroup === '__all__' || entry?.metadata?.group === selectedGroup;
+        const haystack = `${entry?.metadata?.name ?? ''} ${entry?.metadata?.group ?? ''} ${entry?.text ?? ''}`.toLocaleLowerCase();
+        block.toggle(inGroup && (!query || haystack.includes(query)));
+    });
+}
+
+function setNativeGreetingDetailsOpen(root, open) {
+    const character = currentCharacter();
+    if (!character?.avatar) return;
+    const catalog = greetingCatalogState(character);
+    const entries = reconcileGreetingCatalog(catalog, character);
+    root.find('.alternate_greeting').each((_, node) => {
+        const block = $(node);
+        const index = Number(block.attr('data-index'));
+        const entry = entries.find(item => item.kind === 'alternate' && item.index === index);
+        if (!entry?.metadata) return;
+        entry.metadata.collapsed = !open;
+        block.find('details').first().prop('open', open);
+    });
+    saveGreetingCatalogState(character, catalog);
+}
+
+function alternateGreetings(character = currentCharacter()) {
+    character.data ??= {};
+    character.data.alternate_greetings ??= [];
+    return character.data.alternate_greetings;
+}
+
+function syncNativeGreetingRows(root, character = currentCharacter()) {
+    const list = root.find('.alternate_greetings_list');
+    const array = alternateGreetings(character);
+    list.children('.alternate_greeting').each((index, node) => {
+        const block = $(node);
+        block.attr('data-index', index);
+        block.find('.greeting_index').text(index + 1);
+        const text = block.find('.alternate_greeting_text').first();
+        text.attr('id', `alternate_greeting_${index}`);
+        if (text.data('ocsGreetingInputBound')) return;
+        const listener = event => {
+            // Native handlers capture the index that existed when the popup
+            // opened. Once rows are dragged or batch-deleted that index can
+            // be stale, so own the input update using the live DOM index.
+            event.stopImmediatePropagation();
+            const liveIndex = Number(block.attr('data-index'));
+            if (Number.isInteger(liveIndex)) alternateGreetings(character)[liveIndex] = String(text.val() ?? '');
+        };
+        text.get(0)?.addEventListener('input', listener, true);
+        text.data('ocsGreetingInputBound', true);
+    });
+}
+
+function stampNativeGreetingRowIds(root, entries) {
+    root.find('.alternate_greeting').each((_, node) => {
+        const block = $(node);
+        const index = Number(block.attr('data-index'));
+        const id = entries.find(entry => entry.kind === 'alternate' && entry.index === index)?.metadata?.id;
+        if (id) block.attr('data-ocs-greeting-id', id);
+    });
+}
+
+function snapshotNativeGreetingDrag(root, character = currentCharacter()) {
+    const array = alternateGreetings(character);
+    const catalog = greetingCatalogState(character);
+    const before = JSON.stringify(catalog.entries);
+    const entries = reconcileGreetingCatalog(catalog, character)
+        .filter(entry => entry.kind === 'alternate' && entry.metadata?.id);
+    if (JSON.stringify(catalog.entries) !== before) saveGreetingCatalogState(character, catalog);
+    stampNativeGreetingRowIds(root, entries);
+    const valuesById = new Map(entries.map(entry => [entry.metadata.id, array[entry.index]]));
+    const indexById = new Map(entries.map(entry => [entry.metadata.id, entry.index]));
+    root.data('ocsGreetingDragSnapshot', {
+        valuesById,
+        indexById,
+        initialValues: [...array],
+    });
+}
+
+function selectedNativeGreetingIndexes(root) {
+    return root.find('.ocs-native-greeting-select.is-selected').map((_, button) => Number($(button).closest('.alternate_greeting').attr('data-index'))).get().filter(Number.isInteger);
+}
+
+function setNativeGreetingSelected(control, selected) {
+    control
+        .toggleClass('is-selected', selected)
+        .toggleClass('fa-square', !selected)
+        .toggleClass('fa-square-check', selected)
+        .attr('aria-checked', selected ? 'true' : 'false');
+}
+
+function refreshNativeGreetingModes(root) {
+    const batchMode = root.data('ocsBatchMode') === true;
+    const dragMode = root.data('ocsDragMode') === true;
+    root.toggleClass('ocs-greeting-batch-mode', batchMode);
+    root.toggleClass('ocs-greeting-drag-mode', dragMode);
+    root.find('.ocs-native-greeting-batch').toggleClass('active', batchMode);
+    root.find('.ocs-native-greeting-drag-toggle').toggleClass('active', dragMode);
+    root.find('.ocs-native-greeting-batch').attr('title', batchMode ? '退出批量操作' : '批量操作');
+    root.find('.ocs-native-greeting-drag-toggle').attr('title', dragMode ? '切换为上下键排序' : '切换为拖拽排序');
+    root.find('.move_up_alternate_greeting, .move_down_alternate_greeting').toggle(!dragMode);
+}
+
+function applyNativeGreetingDragOrder(root, character = currentCharacter()) {
+    const list = root.find('.alternate_greetings_list');
+    const array = alternateGreetings(character);
+    const catalog = greetingCatalogState(character);
+    const entries = reconcileGreetingCatalog(catalog, character);
+    const metadataById = new Map(entries.filter(entry => entry.kind === 'alternate').map(entry => [entry.metadata?.id, entry.metadata]));
+    const snapshot = root.data('ocsGreetingDragSnapshot');
+    const valuesById = snapshot?.valuesById;
+    // The native `data-index` is only the row's current visual position. It
+    // can be rewritten while jQuery UI is sorting, so it is not safe as a
+    // drag identity. Our catalog already has a permanent id per greeting;
+    // use the ids stamped when drag mode starts instead.
+    const orderedIds = list.children('.alternate_greeting').map((_, node) => String($(node).attr('data-ocs-greeting-id') ?? '')).get();
+    const validPermutation = orderedIds.length === array.length
+        && orderedIds.every(id => metadataById.has(id))
+        && new Set(orderedIds).size === array.length
+        && valuesById instanceof Map
+        && orderedIds.every(id => valuesById.has(id) && typeof valuesById.get(id) === 'string');
+    // Never allow malformed rows to turn a missing array element into the
+    // string "undefined" when SillyTavern next saves the character card.
+    if (!validPermutation) {
+        console.warn('[One-click Snapshot] Drag order rejected: the native greeting rows lost their stable identities.', { orderedIds, length: array.length });
+        toastr.error('拖拽排序未完成，已取消本次变更以保护开场白内容。', '一键快照');
+        // Restore the complete card-side array captured before this drag. A
+        // failed interaction must never leave unrelated greetings empty.
+        if (Array.isArray(snapshot?.initialValues) && snapshot.initialValues.length === array.length) {
+            array.splice(0, array.length, ...snapshot.initialValues);
+        }
+        // Put the DOM back into the actual card order so a rejected drag can
+        // never make names appear to have swapped rows.
+        const rows = list.children('.alternate_greeting').detach().get().sort((left, right) => {
+            const leftIndex = snapshot?.indexById?.get(String($(left).attr('data-ocs-greeting-id') ?? '')) ?? Number.MAX_SAFE_INTEGER;
+            const rightIndex = snapshot?.indexById?.get(String($(right).attr('data-ocs-greeting-id') ?? '')) ?? Number.MAX_SAFE_INTEGER;
+            return leftIndex - rightIndex;
+        });
+        list.append(rows);
+        syncNativeGreetingRows(root, character);
+        return;
+    }
+    // Only write from the frozen source captured at drag start. In
+    // particular, never read from transient native input rows while they are
+    // being detached/reinserted by sortable.
+    array.splice(0, array.length, ...orderedIds.map(id => valuesById.get(id)));
+    orderedIds.forEach((id, newIndex) => {
+        const metadata = metadataById.get(id);
+        if (metadata) metadata.lastIndex = newIndex;
+    });
+    reconcileGreetingCatalog(catalog, character);
+    saveGreetingCatalogState(character, catalog);
+    syncNativeGreetingRows(root, character);
+    scheduleNativeGreetingDecoration();
+}
+
+function setNativeGreetingDragMode(root, enabled) {
+    const list = root.find('.alternate_greetings_list');
+    if (!list.length) return;
+    if (list.sortable('instance') !== undefined) list.sortable('destroy');
+    root.removeData('ocsGreetingDragActive').removeData('ocsGreetingDragSnapshot');
+    root.data('ocsDragMode', enabled);
+    if (enabled) {
+        // Sorting a filtered subset makes the resulting order ambiguous.
+        // Show the full native list while drag mode is active.
+        root.data('ocsBatchMode', false);
+        root.find('.ocs-native-greeting-select').each((_, node) => setNativeGreetingSelected($(node), false));
+        root.find('.ocs-native-greeting-filter-search').val('').trigger('input');
+        root.find('.ocs-native-greeting-filter-group').val('__all__').trigger('change');
+        list.sortable({
+            items: '> .alternate_greeting',
+            handle: '.ocs-native-greeting-drag-handle',
+            delay: getSortableDelay(),
+            axis: 'y',
+            tolerance: 'pointer',
+            forcePlaceholderSize: true,
+            start: () => {
+                snapshotNativeGreetingDrag(root);
+                root.data('ocsGreetingDragActive', true);
+            },
+            update: () => applyNativeGreetingDragOrder(root),
+            stop: () => {
+                root.removeData('ocsGreetingDragActive').removeData('ocsGreetingDragSnapshot');
+                // The mutation observer deliberately holds refreshes while
+                // sorting. Apply all title/index updates only after drop.
+                scheduleNativeGreetingDecoration();
+            },
+        }).disableSelection();
+    }
+    refreshNativeGreetingModes(root);
+}
+
+async function applyNativeGreetingBatchGroup(root) {
+    const character = currentCharacter();
+    const indexes = selectedNativeGreetingIndexes(root);
+    if (!character?.avatar || !indexes.length) return;
+    const catalog = greetingCatalogState(character);
+    const entries = reconcileGreetingCatalog(catalog, character);
+    const group = await chooseGroup('', catalog.entries.map(item => String(item?.group ?? '').trim()), {
+        title: `为 ${indexes.length} 条开场白设置分组`,
+        okButton: '确认分组',
+    });
+    if (group === null) return;
+    for (const entry of entries) if (entry.kind === 'alternate' && indexes.includes(entry.index)) entry.metadata.group = group;
+    saveGreetingCatalogState(character, catalog);
+    scheduleNativeGreetingDecoration();
+}
+
+async function deleteNativeGreetingRows(root) {
+    const indexes = selectedNativeGreetingIndexes(root);
+    await deleteNativeGreetingIndexes(root, indexes);
+}
+
+async function deleteNativeGreetingIndexes(root, indexes) {
+    const character = currentCharacter();
+    if (!character?.avatar || !indexes.length) return;
+    const count = indexes.length;
+    if (!await Popup.show.confirm(`删除 ${count} 条开场白？`, '此操作只删除选中的备选开场白，且无法撤销。')) return;
+    const array = alternateGreetings(character);
+    const indexSet = new Set(indexes);
+    array.splice(0, array.length, ...array.filter((_, index) => !indexSet.has(index)));
+    root.find('.alternate_greeting').filter((_, node) => indexSet.has(Number($(node).attr('data-index')))).remove();
+    const catalog = greetingCatalogState(character);
+    reconcileGreetingCatalog(catalog, character);
+    saveGreetingCatalogState(character, catalog);
+    syncNativeGreetingRows(root, character);
+    scheduleNativeGreetingDecoration();
+}
+
+function decorateNativeAlternateGreetings() {
+    const character = currentCharacter();
+    if (!character?.avatar) return;
+    $('dialog.popup .alternate_grettings').each((_, node) => {
+        const root = $(node);
+        const catalog = greetingCatalogState(character);
+        const catalogBefore = JSON.stringify(catalog.entries);
+        const entries = reconcileGreetingCatalog(catalog, character).filter(entry => entry.kind === 'alternate');
+        if (JSON.stringify(catalog.entries) !== catalogBefore) saveGreetingCatalogState(character, catalog);
+        const list = root.find('.alternate_greetings_list');
+        if (!list.length) return;
+        syncNativeGreetingRows(root, character);
+        // Outside drag mode the native row indexes match the card exactly.
+        // Re-stamp them so a later drag always starts from a known identity.
+        if (root.data('ocsDragMode') !== true) stampNativeGreetingRowIds(root, entries);
+
+        root.children('.title_restorable').find('.ocs-native-greeting-expand, .ocs-native-greeting-collapse').remove();
+
+        if (!root.find('.ocs-native-greeting-toolbar').length) {
+            const toolbar = $('<div class="ocs-native-greeting-toolbar"><input class="text_pole ocs-native-greeting-filter-search" type="search" placeholder="搜索名称、分组或开场白内容"><select class="text_pole ocs-native-greeting-filter-group" title="按分组筛选"><option value="__all__">全部分组</option></select><div class="menu_button ocs-native-greeting-expand fa-solid fa-angles-down" title="展开全部开场白"></div><div class="menu_button ocs-native-greeting-collapse fa-solid fa-angles-up" title="收起全部开场白"></div><div class="menu_button ocs-native-greeting-drag-toggle fa-solid fa-up-down-left-right" title="切换拖拽排序"></div><div class="menu_button ocs-native-greeting-batch fa-solid fa-list-check" title="批量操作"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-all fa-solid fa-check-double" title="全选 / 取消全选"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-group fa-solid fa-folder-tree" title="为选中开场白分组"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-delete fa-solid fa-trash" title="删除选中开场白"></div></div>');
+            list.before(toolbar);
+        }
+        const toolbar = root.find('.ocs-native-greeting-toolbar');
+        toolbar
+            .off('input.oneClickSnapshotGreetingFilter change.oneClickSnapshotGreetingFilter', 'select, input')
+            .on('input.oneClickSnapshotGreetingFilter change.oneClickSnapshotGreetingFilter', 'select, input', () => updateNativeGreetingFilter(root, entries));
+        toolbar.find('.ocs-native-greeting-expand')
+            .off('click.oneClickSnapshotGreetingExpand')
+            .on('click.oneClickSnapshotGreetingExpand', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setNativeGreetingDetailsOpen(root, true);
+            });
+        toolbar.find('.ocs-native-greeting-collapse')
+            .off('click.oneClickSnapshotGreetingCollapse')
+            .on('click.oneClickSnapshotGreetingCollapse', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setNativeGreetingDetailsOpen(root, false);
+            });
+        toolbar.find('.ocs-native-greeting-drag-toggle')
+            .off('click.oneClickSnapshotGreetingDrag')
+            .on('click.oneClickSnapshotGreetingDrag', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                setNativeGreetingDragMode(root, root.data('ocsDragMode') !== true);
+            });
+        toolbar.find('.ocs-native-greeting-batch')
+            .off('click.oneClickSnapshotGreetingBatch')
+            .on('click.oneClickSnapshotGreetingBatch', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const enabled = root.data('ocsBatchMode') !== true;
+                if (enabled && root.data('ocsDragMode') === true) setNativeGreetingDragMode(root, false);
+                root.data('ocsBatchMode', enabled);
+                root.find('.ocs-native-greeting-select').each((_, node) => setNativeGreetingSelected($(node), false));
+                refreshNativeGreetingModes(root);
+            });
+        toolbar.find('.ocs-native-greeting-batch-all')
+            .off('click.oneClickSnapshotGreetingBatchAll')
+            .on('click.oneClickSnapshotGreetingBatchAll', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                const checks = root.find('.ocs-native-greeting-select');
+                const selectAll = checks.length > 0 && checks.filter('.is-selected').length !== checks.length;
+                checks.each((_, node) => setNativeGreetingSelected($(node), selectAll));
+            });
+        toolbar.find('.ocs-native-greeting-batch-group')
+            .off('click.oneClickSnapshotGreetingBatchGroup')
+            .on('click.oneClickSnapshotGreetingBatchGroup', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                await applyNativeGreetingBatchGroup(root);
+            });
+        toolbar.find('.ocs-native-greeting-batch-delete')
+            .off('click.oneClickSnapshotGreetingBatchDelete')
+            .on('click.oneClickSnapshotGreetingBatchDelete', async event => {
+                event.preventDefault();
+                event.stopPropagation();
+                await deleteNativeGreetingRows(root);
+            });
+
+        list.find('.alternate_greeting').each((_, greetingNode) => {
+            const block = $(greetingNode);
+            const index = Number(block.attr('data-index'));
+            const entry = entries.find(item => item.index === index);
+            if (!entry?.metadata) return;
+            const details = block.find('details').first();
+            details
+                .off('toggle.oneClickSnapshotGreetingCollapsed')
+                .on('toggle.oneClickSnapshotGreetingCollapsed', () => {
+                    const collapsed = !details.prop('open');
+                    if (entry.metadata.collapsed === collapsed) return;
+                    entry.metadata.collapsed = collapsed;
+                    saveGreetingCatalogState(character, catalog);
+                });
+            details.prop('open', entry.metadata.collapsed !== true);
+            const summaryTitle = details.find('summary strong').first();
+            const titleRow = summaryTitle.closest('.flex-container').first();
+            const controls = details.find('summary .title_restorable').first();
+            let check = titleRow.find('.ocs-native-greeting-select');
+            // Native <summary> consumes checkbox pointer events on some
+            // browsers.  Use a checkbox-looking menu button instead so batch
+            // selection never toggles the greeting panel or loses the click.
+            if (!check.length || !check.is('div')) {
+                check.remove();
+                check = $('<div class="menu_button ocs-native-greeting-select fa-regular fa-square" role="checkbox" aria-checked="false" title="选择开场白"></div>');
+                summaryTitle.before(check);
+            }
+            check
+                .off('click.oneClickSnapshotGreetingSelect')
+                .on('click.oneClickSnapshotGreetingSelect', event => {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    if (root.data('ocsBatchMode') !== true) return;
+                    setNativeGreetingSelected(check, !check.hasClass('is-selected'));
+                });
+            let dragHandle = controls.find('.ocs-native-greeting-drag-handle');
+            if (!dragHandle.length) {
+                dragHandle = $('<div class="menu_button ocs-native-greeting-drag-handle fa-solid fa-grip-vertical" title="拖拽排序"></div>');
+                controls.find('.move_up_alternate_greeting').before(dragHandle);
+            }
+            titleRow.find('.ocs-native-greeting-number, .ocs-native-greeting-group-badge').remove();
+            summaryTitle.text(entry.metadata.name || `其他开场白 #${index + 1}`);
+            if (entry.metadata.name) titleRow.append($('<small class="ocs-native-greeting-number"></small>').text(`#${index + 1}`));
+            if (entry.metadata.group) titleRow.append($('<small class="ocs-native-greeting-group-badge"></small>').text(entry.metadata.group));
+
+            let renameButton = controls.find('.ocs-native-greeting-rename');
+            let groupButton = controls.find('.ocs-native-greeting-group-edit');
+            if (!renameButton.length) {
+                renameButton = $('<div class="menu_button ocs-native-greeting-rename fa-solid fa-pen" title="重命名开场白"></div>');
+                groupButton = $('<div class="menu_button ocs-native-greeting-group-edit fa-solid fa-folder-tree" title="设置开场白分组"></div>');
+                const before = controls.find('.move_up_alternate_greeting');
+                if (before.length) before.before(renameButton, groupButton);
+                else controls.find('.delete_alternate_greeting').before(renameButton, groupButton);
+            }
+            renameButton
+                .off('click.oneClickSnapshotGreetingRename')
+                .on('click.oneClickSnapshotGreetingRename', async event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    await editGreetingMetadata(character, catalog, entry, 'name');
+                });
+            groupButton
+                .off('click.oneClickSnapshotGreetingGroup')
+                .on('click.oneClickSnapshotGreetingGroup', async event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    await editGreetingMetadata(character, catalog, entry, 'group');
+                });
+        });
+        refreshNativeGreetingModes(root);
+        updateNativeGreetingFilter(root, entries);
+    });
+}
+
+function scheduleNativeGreetingDecoration() {
+    const dragging = $('dialog.popup .alternate_grettings').toArray().some(node => $(node).data('ocsGreetingDragActive') === true);
+    if (dragging) {
+        greetingCatalogDecorateDeferred = true;
+        return;
+    }
+    if (greetingCatalogDecorateQueued) return;
+    greetingCatalogDecorateQueued = true;
+    queueMicrotask(() => {
+        greetingCatalogDecorateQueued = false;
+        const stillDragging = $('dialog.popup .alternate_grettings').toArray().some(node => $(node).data('ocsGreetingDragActive') === true);
+        if (stillDragging) {
+            greetingCatalogDecorateDeferred = true;
+            return;
+        }
+        greetingCatalogDecorateDeferred = false;
+        decorateNativeAlternateGreetings();
+    });
+}
+
+function captureNativeGreetingControls(event) {
+    if (!(event.target instanceof Element)) return;
+    const control = event.target.closest('.move_up_alternate_greeting, .move_down_alternate_greeting, .delete_alternate_greeting');
+    if (!control) return;
+    const root = $(control).closest('dialog.popup').find('.alternate_grettings').first();
+    const block = control.closest('.alternate_greeting');
+    const index = Number(block?.getAttribute('data-index'));
+    const character = currentCharacter();
+    if (!root.length || !Number.isInteger(index) || !character?.avatar) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (control.classList.contains('delete_alternate_greeting')) {
+        void deleteNativeGreetingIndexes(root, [index]);
+        return;
+    }
+    const direction = control.classList.contains('move_up_alternate_greeting') ? -1 : 1;
+    const nextIndex = index + direction;
+    const array = alternateGreetings(character);
+    if (nextIndex < 0 || nextIndex >= array.length) return;
+    const catalog = greetingCatalogState(character);
+    const entries = reconcileGreetingCatalog(catalog, character);
+    const moved = entries.find(entry => entry.kind === 'alternate' && entry.index === index)?.metadata;
+    const adjacent = entries.find(entry => entry.kind === 'alternate' && entry.index === nextIndex)?.metadata;
+    if (!moved || !adjacent) return;
+
+    [array[index], array[nextIndex]] = [array[nextIndex], array[index]];
+    [moved.lastIndex, adjacent.lastIndex] = [adjacent.lastIndex, moved.lastIndex];
+    root.find(`.alternate_greeting[data-index="${index}"] .alternate_greeting_text`).val(array[index]);
+    root.find(`.alternate_greeting[data-index="${nextIndex}"] .alternate_greeting_text`).val(array[nextIndex]);
+    reconcileGreetingCatalog(catalog, character);
+    saveGreetingCatalogState(character, catalog);
+    scheduleNativeGreetingDecoration();
+}
+
+function installGreetingCatalogIntegration() {
+    if (greetingCatalogObserver) return;
+    greetingCatalogObserver = new MutationObserver(mutations => {
+        const addedGreetingNode = mutations.some(mutation => [...mutation.addedNodes].some(node => node.nodeType === Node.ELEMENT_NODE
+            && (node.matches('.alternate_grettings, .alternate_greeting') || node.querySelector?.('.alternate_grettings, .alternate_greeting'))));
+        if (addedGreetingNode) scheduleNativeGreetingDecoration();
+    });
+    greetingCatalogObserver.observe(document.body, { childList: true, subtree: true });
+    document.addEventListener('click', captureNativeGreetingControls, true);
+    $(document)
+        .off('click.oneClickSnapshotGreetingCatalog', '.open_alternate_greetings, .add_alternate_greeting, .move_up_alternate_greeting, .move_down_alternate_greeting')
+        .on('click.oneClickSnapshotGreetingCatalog', '.open_alternate_greetings, .add_alternate_greeting, .move_up_alternate_greeting, .move_down_alternate_greeting', scheduleNativeGreetingDecoration);
 }
 
 function greetingBindingRecords(character = currentCharacter()) {
@@ -2079,7 +2651,7 @@ function snapshotGreetingBindings(snapshotId) {
                     avatar,
                     characterName: character?.name || record.characterName || avatar,
                     key,
-                    label: record.label || liveLabel || greetingLabelFromKey(key) || '已变更的开场白',
+                    label: liveLabel || record.label || greetingLabelFromKey(key) || '已变更的开场白',
                     enabled: record.enabled !== false,
                 };
         });
@@ -2096,15 +2668,39 @@ async function chooseGreetingCandidate(character, { onlySnapshotId = null, title
         toastr.warning(onlySnapshotId ? '当前角色没有可解绑的开场白。' : '当前角色还没有可绑定的开场白。', '一键快照');
         return null;
     }
-    const root = $('<div class="ocs-greeting-choice"><label class="ocs-greeting-choice-label">开场白<select class="text_pole ocs-greeting-choice-select"></select></label><p class="ocs-greeting-choice-preview"></p></div>');
-    const select = root.find('select');
-    for (const candidate of candidates) {
-        const preview = candidate.text.replace(/\s+/g, ' ').trim();
-        select.append($('<option></option>').val(candidate.key).text(`${candidate.label}：${preview.slice(0, 42)}${preview.length > 42 ? '…' : ''}`));
+    const root = $('<div class="ocs-greeting-choice"><div class="ocs-greeting-choice-groups"><span class="ocs-greeting-choice-group-title">分组</span><div class="ocs-greeting-choice-group-tags" role="group" aria-label="选择开场白分组"></div></div><label class="ocs-greeting-choice-label">开场白<select class="text_pole ocs-greeting-choice-select"></select></label><p class="ocs-greeting-choice-preview"></p></div>');
+    const groupTags = root.find('.ocs-greeting-choice-group-tags');
+    const select = root.find('.ocs-greeting-choice-select');
+    const groups = [...new Set(candidates.map(candidate => candidate.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    const groupOptions = [{ key: '__all__', label: '全部' }];
+    if (candidates.some(candidate => !candidate.group)) groupOptions.push({ key: '', label: '未分组' });
+    groupOptions.push(...groups.map(group => ({ key: group, label: group })));
+    let selectedGroup = '__all__';
+    const renderCandidates = () => {
+        const filtered = candidates.filter(candidate => selectedGroup === '__all__' || candidate.group === selectedGroup);
+        select.empty();
+        for (const candidate of filtered) select.append($('<option></option>').val(candidate.key).text(candidate.label));
+        root.find('.ocs-greeting-choice-preview').text(filtered.find(candidate => candidate.key === select.val())?.text ?? '');
+    };
+    for (const option of groupOptions) {
+        const tag = $('<button type="button" class="ocs-greeting-choice-group-tag"></button>')
+            .text(option.label)
+            .attr({ 'data-group': option.key, 'aria-pressed': option.key === selectedGroup ? 'true' : 'false' })
+            .toggleClass('is-active', option.key === selectedGroup)
+            .on('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                selectedGroup = option.key;
+                groupTags.find('.ocs-greeting-choice-group-tag')
+                    .removeClass('is-active')
+                    .attr('aria-pressed', 'false');
+                tag.addClass('is-active').attr('aria-pressed', 'true');
+                renderCandidates();
+            });
+        groupTags.append(tag);
     }
-    const updatePreview = () => root.find('.ocs-greeting-choice-preview').text(candidates.find(candidate => candidate.key === select.val())?.text ?? '');
-    select.on('change', updatePreview);
-    updatePreview();
+    select.on('change', () => root.find('.ocs-greeting-choice-preview').text(candidates.find(candidate => candidate.key === select.val())?.text ?? ''));
+    renderCandidates();
     const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, title, {
         wide: false,
         leftAlign: true,
@@ -2382,7 +2978,7 @@ async function renameVersion(type, versionId) {
     refreshVersionIndicators();
 }
 
-async function chooseGroup(currentGroup, availableGroups) {
+async function chooseGroup(currentGroup, availableGroups, { title = '移动到分组', okButton = '确认移动' } = {}) {
     const groups = [...new Set([
         ...availableGroups,
         String(currentGroup ?? '').trim(),
@@ -2399,10 +2995,10 @@ async function chooseGroup(currentGroup, availableGroups) {
         $('<label class="ocs-group-picker-select-label">已有分组</label>').append(select),
         $('<label class="ocs-group-picker-new-label">新建分组</label>').append(newGroup),
     );
-    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, '移动到分组', {
+    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, title, {
         wide: false,
         leftAlign: true,
-        okButton: '确认移动',
+        okButton,
         cancelButton: '取消',
     });
     popup.dlg.classList.add('ocs-dialog');
@@ -3572,6 +4168,7 @@ $(async () => {
     registerQrAssistantShortcut();
     installQrShortcut();
     installVersionMenu();
+    installGreetingCatalogIntegration();
     installVersionAutoSync();
     eventSource.on(event_types.SETTINGS_UPDATED, refreshConnectionStatusDisplay);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
