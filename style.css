@@ -120,6 +120,8 @@
 .ocs-greeting-choice-label select { width: 100%; min-width: 0; }
 .ocs-greeting-choice-preview { max-height: 12em; margin: 0; padding: 8px 9px; overflow: auto; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); font-size: .84em; line-height: 1.45; white-space: pre-wrap; }
 .ocs-native-greeting-toolbar { display: flex; align-items: center; gap: 6px; margin: 7px 0 3px; }
+.alternate_grettings.ocs-native-greeting-catalog { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
+.alternate_grettings.ocs-native-greeting-catalog .alternate_greetings_list { min-height: 0; }
 .ocs-native-greeting-toolbar-filters { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; gap: 6px; }
 .ocs-native-greeting-toolbar :is(select, input) { box-sizing: border-box; min-width: 0; margin: 0; }
 .ocs-native-greeting-filter-search { flex: 1 1 auto; width: auto !important; }
@@ -304,10 +306,10 @@
        filter first, then a predictable strip of touch-sized controls. */
     .ocs-greeting-choice { width: 100%; min-width: 0; }
     .ocs-greeting-choice-group-tag { min-height: 30px; padding: 4px 9px; }
-    .ocs-native-greeting-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 9px 0 6px; }
-    .ocs-native-greeting-toolbar-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(94px, .82fr); gap: 5px; }
+    .ocs-native-greeting-toolbar { display: grid; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 9px 0 6px; }
+    .ocs-native-greeting-toolbar-filters { display: grid; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr) minmax(94px, .82fr); gap: 5px; }
     .ocs-native-greeting-filter-search,
-    .ocs-native-greeting-filter-group { width: 100% !important; min-height: 32px; }
+    .ocs-native-greeting-filter-group { box-sizing: border-box !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important; min-height: 32px; }
     .ocs-native-greeting-toolbar-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
     .ocs-greeting-batch-mode .ocs-native-greeting-toolbar-batch-actions { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); }
     .ocs-native-greeting-toolbar .menu_button { display: grid; place-items: center; width: 100%; min-width: 0; min-height: 27px; margin: 0; padding: 0 3px; overflow: visible; font-size: .86em; line-height: 1; touch-action: manipulation; }

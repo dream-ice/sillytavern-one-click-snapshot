@@ -2382,6 +2382,7 @@ function decorateNativeAlternateGreetings() {
     if (!character?.avatar) return;
     $('dialog.popup .alternate_grettings').each((_, node) => {
         const root = $(node);
+        root.addClass('ocs-native-greeting-catalog');
         const catalog = greetingCatalogState(character);
         const catalogBefore = JSON.stringify(catalog.entries);
         const entries = reconcileGreetingCatalog(catalog, character).filter(entry => entry.kind === 'alternate');
