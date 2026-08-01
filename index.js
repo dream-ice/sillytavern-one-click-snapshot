@@ -166,11 +166,15 @@ function refreshVersionIndicators() {
     $('#one_click_snapshot_character_version_hint, #one_click_snapshot_persona_version_hint').remove();
     const characterVersion = currentCharacterVersion();
     if (characterVersion?.name) {
-        $('#description_textarea').after($('<span id="one_click_snapshot_character_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${characterVersion.name}`));
+        const hint = $('<span id="one_click_snapshot_character_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${characterVersion.name}`);
+        const title = $('#description_div > .flex-container').first();
+        title.append(hint);
     }
     const personaVersion = currentPersonaVersion();
     if (personaVersion?.name) {
-        $('#persona_description').after($('<span id="one_click_snapshot_persona_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${personaVersion.name}`));
+        const hint = $('<span id="one_click_snapshot_persona_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${personaVersion.name}`);
+        const title = $('#persona_description').prevAll('h4').first();
+        title.append(hint);
     }
     refreshVersionAvatarOverrides();
 }
@@ -2316,7 +2320,7 @@ function setNativeGreetingDragMode(root, enabled) {
         list.sortable({
             items: '> .alternate_greeting',
             handle: '.ocs-native-greeting-drag-handle',
-            delay: getSortableDelay(),
+            delay: window.matchMedia?.('(pointer: coarse)').matches ? 0 : getSortableDelay(),
             axis: 'y',
             tolerance: 'pointer',
             forcePlaceholderSize: true,
@@ -2392,7 +2396,7 @@ function decorateNativeAlternateGreetings() {
         root.children('.title_restorable').find('.ocs-native-greeting-expand, .ocs-native-greeting-collapse').remove();
 
         if (!root.find('.ocs-native-greeting-toolbar').length) {
-            const toolbar = $('<div class="ocs-native-greeting-toolbar"><input class="text_pole ocs-native-greeting-filter-search" type="search" placeholder="搜索名称、分组或开场白内容"><select class="text_pole ocs-native-greeting-filter-group" title="按分组筛选"><option value="__all__">全部分组</option></select><div class="menu_button ocs-native-greeting-expand fa-solid fa-angles-down" title="展开全部开场白"></div><div class="menu_button ocs-native-greeting-collapse fa-solid fa-angles-up" title="收起全部开场白"></div><div class="menu_button ocs-native-greeting-drag-toggle fa-solid fa-up-down-left-right" title="切换拖拽排序"></div><div class="menu_button ocs-native-greeting-batch fa-solid fa-list-check" title="批量操作"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-all fa-solid fa-check-double" title="全选 / 取消全选"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-group fa-solid fa-folder-tree" title="为选中开场白分组"></div><div class="menu_button ocs-native-greeting-batch-only ocs-native-greeting-batch-delete fa-solid fa-trash" title="删除选中开场白"></div></div>');
+            const toolbar = $('<div class="ocs-native-greeting-toolbar"><div class="ocs-native-greeting-toolbar-filters"><input class="text_pole ocs-native-greeting-filter-search" type="search" placeholder="搜索名称、分组或开场白内容"><select class="text_pole ocs-native-greeting-filter-group" title="按分组筛选"><option value="__all__">全部分组</option></select></div><div class="ocs-native-greeting-toolbar-actions"><div class="menu_button ocs-native-greeting-expand fa-solid fa-angles-down" title="展开全部开场白"></div><div class="menu_button ocs-native-greeting-collapse fa-solid fa-angles-up" title="收起全部开场白"></div><div class="menu_button ocs-native-greeting-drag-toggle fa-solid fa-up-down-left-right" title="切换拖拽排序"></div><div class="menu_button ocs-native-greeting-batch fa-solid fa-list-check" title="批量操作"></div></div><div class="ocs-native-greeting-toolbar-batch-actions ocs-native-greeting-batch-only"><div class="menu_button ocs-native-greeting-batch-all fa-solid fa-check-double" title="全选 / 取消全选"></div><div class="menu_button ocs-native-greeting-batch-group fa-solid fa-folder-tree" title="为选中开场白分组"></div><div class="menu_button ocs-native-greeting-batch-delete fa-solid fa-trash" title="删除选中开场白"></div></div></div>');
             list.before(toolbar);
         }
         const toolbar = root.find('.ocs-native-greeting-toolbar');

@@ -119,10 +119,13 @@
 .ocs-greeting-choice-label { display: grid; gap: 5px; font-size: .9em; }
 .ocs-greeting-choice-label select { width: 100%; min-width: 0; }
 .ocs-greeting-choice-preview { max-height: 12em; margin: 0; padding: 8px 9px; overflow: auto; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); font-size: .84em; line-height: 1.45; white-space: pre-wrap; }
-.ocs-native-greeting-toolbar { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; margin: 7px 0 3px; }
+.ocs-native-greeting-toolbar { display: flex; align-items: center; gap: 6px; margin: 7px 0 3px; }
+.ocs-native-greeting-toolbar-filters { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; gap: 6px; }
 .ocs-native-greeting-toolbar :is(select, input) { box-sizing: border-box; min-width: 0; margin: 0; }
 .ocs-native-greeting-filter-search { flex: 1 1 auto; width: auto !important; }
 .ocs-native-greeting-filter-group { flex: 0 1 154px; width: 154px !important; }
+.ocs-native-greeting-toolbar-actions,
+.ocs-native-greeting-toolbar-batch-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .ocs-native-greeting-toolbar .menu_button { flex: 0 0 auto; min-width: 30px; margin: 0; }
 .ocs-native-greeting-batch-only { display: none !important; }
 .ocs-greeting-batch-mode .ocs-native-greeting-batch-only { display: flex !important; }
@@ -260,7 +263,7 @@
 .ocs-version-diff-added { padding: 1px 0; background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 34%, transparent); }
 .ocs-version-diff-removed { padding: 1px 0; background: color-mix(in srgb, #c66 40%, transparent); }
 .ocs-version-diff-empty { opacity: .58; font-style: italic; }
-.ocs-native-version-hint { display: inline-block; margin: 4px 0 0; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; opacity: .9; }
+.ocs-native-version-hint { display: inline-block; max-width: min(44vw, 18em); margin: 0 5px; overflow: hidden; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; line-height: 1.2; text-overflow: ellipsis; vertical-align: middle; white-space: nowrap; opacity: .9; }
 
 @media (max-width: 700px) {
     /* Same approach as Timeline Memory: only neutralize the wide popup's
@@ -297,6 +300,35 @@
     .ocs-snapshot-card { padding: 9px; }
     .ocs-card-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; gap: 5px; }
     .ocs-card-actions .ocs-button { width: 100% !important; min-width: 0; padding: 5px 3px; white-space: normal !important; }
+    /* Alternate-greeting management stays deliberately compact on phones:
+       filter first, then a predictable strip of touch-sized controls. */
+    .ocs-greeting-choice { width: 100%; min-width: 0; }
+    .ocs-greeting-choice-group-tag { min-height: 30px; padding: 4px 9px; }
+    .ocs-native-greeting-toolbar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 9px 0 6px; }
+    .ocs-native-greeting-toolbar-filters { display: grid; grid-template-columns: minmax(0, 1fr) minmax(94px, .82fr); gap: 5px; }
+    .ocs-native-greeting-filter-search,
+    .ocs-native-greeting-filter-group { width: 100% !important; min-height: 32px; }
+    .ocs-native-greeting-toolbar-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+    .ocs-greeting-batch-mode .ocs-native-greeting-toolbar-batch-actions { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); }
+    .ocs-native-greeting-toolbar .menu_button { display: grid; place-items: center; width: 100%; min-width: 0; min-height: 27px; margin: 0; padding: 0 3px; overflow: visible; font-size: .86em; line-height: 1; touch-action: manipulation; }
+    .ocs-greeting-batch-mode .ocs-native-greeting-toolbar-batch-actions .menu_button { min-height: 25px; font-size: .8em; }
+    .ocs-native-greeting-expand { padding-left: 4px !important; }
+    .ocs-native-greeting-select { min-width: 28px !important; min-height: 28px; margin-right: 2px !important; }
+    /* Keep SillyTavern's native summary structure intact: the expander stays
+       visible, while only its text label gets compacted on narrow screens. */
+    .alternate_grettings .alternate_greeting summary { position: relative; margin-left: 0; padding-left: 18px; list-style: none; }
+    .alternate_grettings .alternate_greeting summary::-webkit-details-marker { display: none; }
+    .alternate_grettings .alternate_greeting summary::before { content: '\f078'; position: absolute; top: .48em; left: 3px; width: 10px; color: currentColor; font-family: 'Font Awesome 6 Free'; font-size: .72em; font-weight: 900; line-height: 1; opacity: .7; transition: transform var(--animation-duration, .18s) ease; }
+    .alternate_grettings .alternate_greeting details:not([open]) summary::before { transform: rotate(-90deg); }
+    .alternate_grettings .alternate_greeting summary > .title_restorable { display: flex; align-items: center; gap: 3px; min-width: 0; }
+    .alternate_grettings .alternate_greeting summary .flex-container { flex: 1 1 auto; min-width: 74px; gap: 3px; }
+    .alternate_grettings .alternate_greeting summary strong { min-width: 0; overflow-wrap: anywhere; line-height: 1.22; white-space: normal; }
+    .alternate_grettings .alternate_greeting summary .editor_maximize { flex: 0 0 auto; }
+    .alternate_grettings .alternate_greeting summary .expander { flex: 0 0 auto; }
+    .alternate_grettings .alternate_greeting summary .menu_button { flex: 0 0 27px; min-width: 27px; min-height: 27px; padding: 0; }
+    .alternate_grettings .alternate_greeting .delete_alternate_greeting span { display: none; }
+    .ocs-native-greeting-number { display: none; }
+    .ocs-native-greeting-group-badge { max-width: 7em; margin-left: 0; }
     .ocs-content-drawer-body { margin-left: 2px; padding-left: 6px; }
     .ocs-content-items { font-size: .94em; }
     .ocs-version-switch-popup { width: 100%; max-width: 100%; }
