@@ -301,7 +301,14 @@
 #user_avatar_block .ocs-persona-card-tags:empty { display: none; }
 #user_avatar_block .ocs-persona-card-tags .tag { max-width: 12em; }
 #user_avatar_block .ocs-persona-card-tags .tag_name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#user_avatar_block .avatar-container.ocs-persona-fav .avatar { box-shadow: 0 0 0 2px var(--golden, #ffd700); }
+/* Favorites also get a ring, in its own color: stock SillyTavern spends
+   `--golden` on `.default_persona` (`.avatar-container.default_persona .avatar`),
+   and reusing it here would read as "default user".
+   Deliberately `box-shadow` rather than `outline` — the golden outline is drawn
+   outside the border box, so a persona that is both default and favorite shows
+   two concentric rings instead of one overwriting the other. */
+#user_avatar_block { --ocs-persona-fav-color: rgb(236, 106, 160); }
+#user_avatar_block .avatar-container.ocs-persona-fav .avatar { box-shadow: 0 0 0 3px var(--ocs-persona-fav-color); }
 
 /* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
    a flat grey wash over every card, the theme quote color for the selected
