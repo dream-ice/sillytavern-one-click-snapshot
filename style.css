@@ -307,8 +307,12 @@
    Deliberately `box-shadow` rather than `outline` — the golden outline is drawn
    outside the border box, so a persona that is both default and favorite shows
    two concentric rings instead of one overwriting the other. */
-#user_avatar_block { --ocs-persona-fav-color: rgb(236, 106, 160); }
-#user_avatar_block .avatar-container.ocs-persona-fav .avatar { box-shadow: 0 0 0 3px var(--ocs-persona-fav-color); }
+/* Wrapped in `:where()` so both rules carry almost no specificity and a user
+   theme can restyle or switch them off without an escalation war: `:where()`
+   contributes 0, leaving the variable at 0 and the ring at (1 id, 1 class).
+   Any ordinary theme rule outweighs that regardless of load order. */
+:where(#user_avatar_block) { --ocs-persona-fav-color: rgb(236, 106, 160); }
+#user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar { box-shadow: 0 0 0 3px var(--ocs-persona-fav-color); }
 
 /* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
    a flat grey wash over every card, the theme quote color for the selected
