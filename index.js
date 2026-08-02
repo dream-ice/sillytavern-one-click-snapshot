@@ -26,10 +26,11 @@ import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
 import { getChatCompletionModel, selected_proxy, settingsToUpdate } from '../../../openai.js';
 import { SECRET_KEYS, rotateSecret, secret_state } from '../../../secrets.js';
-import { getConnectedPersonas, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
+import { getConnectedPersonas, getUserAvatars, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
 import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallowScopedScripts, getCurrentPresetAPI, getCurrentPresetName, getScriptsByType, isPresetScriptsAllowed, isScopedScriptsAllowed, saveScriptsByType, SCRIPT_TYPES } from '../../regex/engine.js';
 import { DiffMatchPatch } from '../../../../lib.js';
+import { installPersonaManager } from './persona-manager.js';
 
 const EXTENSION_KEY = 'one_click_snapshot';
 const METADATA_KEY = 'one_click_snapshot';
@@ -114,6 +115,8 @@ function settings() {
     value.activeCharacterVersions ??= {};
     value.activePersonaVersions ??= {};
     value.autoSyncVersions ??= false;
+    value.characterNameMirror ??= {};
+    value.personaNameMirror ??= {};
     value.lastCaptureScopes ??= deepClone(DEFAULT_CAPTURE_SCOPES);
     for (const key of ['character', 'persona', 'theme', 'worldInfo', 'preset', 'api', 'regex']) value.lastCaptureScopes[key] ??= DEFAULT_CAPTURE_SCOPES[key];
     value.lastCaptureScopes.worldSources ??= deepClone(DEFAULT_CAPTURE_SCOPES.worldSources);
@@ -160,6 +163,112 @@ function currentCharacterVersion() {
 function currentPersonaVersion() {
     const active = settings().activePersonaVersions[user_avatar];
     return personaVersions().find(version => version.id === active) ?? null;
+}
+
+/* ------------------------------------------------- version name mirroring -- */
+
+/**
+ * Per-avatar state for mirroring a version name into the native field that the
+ * character / persona list already displays:
+ * - character -> `data.character_version`, shown on the card as `.character_version`
+ * - persona   -> `persona_descriptions[avatar].title`, shown as `.ch_additional_info`
+ *
+ * `previous` keeps whatever the user had written there before mirroring was
+ * switched on, so turning it back off can offer to restore it.
+ *
+ * @param {'character'|'persona'} type Version type
+ * @returns {Record<string, {previous: string}>}
+ */
+function nameMirrorStore(type) {
+    const key = type === 'character' ? 'characterNameMirror' : 'personaNameMirror';
+    settings()[key] ??= {};
+    return settings()[key];
+}
+
+function nameMirrorOwner(type) {
+    return type === 'character' ? currentCharacter()?.avatar ?? null : user_avatar || null;
+}
+
+function isNameMirrorEnabled(type, owner = nameMirrorOwner(type)) {
+    return Boolean(owner) && Boolean(nameMirrorStore(type)[owner]);
+}
+
+/** Reads the native field that mirroring writes into. */
+function nativeVersionLabel(type) {
+    if (type === 'character') return String(currentCharacter()?.data?.character_version ?? '');
+    return String(power_user.persona_descriptions?.[user_avatar]?.title ?? '');
+}
+
+/**
+ * Writes a label into the native field and repaints whatever displays it.
+ * The character card is written by the caller's own save, so this only
+ * persists for personas.
+ *
+ * @param {'character'|'persona'} type Version type
+ * @param {string} label Text to write
+ * @param {object} [options]
+ * @param {boolean} [options.persist=true] Whether to save and repaint here
+ */
+async function writeNativeVersionLabel(type, label, { persist = true } = {}) {
+    if (type === 'character') {
+        const character = currentCharacter();
+        if (!character) return;
+        character.data ??= {};
+        character.data.character_version = label;
+        $('#character_version_textarea').val(label);
+        if (persist) await createOrEditCharacter(new CustomEvent('ocs-name-mirror'));
+        return;
+    }
+
+    const avatar = user_avatar;
+    if (!avatar || !power_user.persona_descriptions?.[avatar]) return;
+    if (label) power_user.persona_descriptions[avatar].title = label;
+    else delete power_user.persona_descriptions[avatar].title;
+    if (!persist) return;
+    saveSettingsDebounced();
+    await getUserAvatars(true, avatar);
+    await eventSource.emit(event_types.PERSONA_UPDATED, avatar);
+}
+
+/**
+ * Pushes the active version's name into the native field. Called after a
+ * version is applied or renamed.
+ *
+ * @param {'character'|'persona'} type Version type
+ * @param {object} [options]
+ * @param {boolean} [options.persist=true] Whether to save here, or let the caller's own save cover it
+ */
+async function applyNameMirror(type, { persist = true } = {}) {
+    if (!isNameMirrorEnabled(type)) return;
+    const version = type === 'character' ? currentCharacterVersion() : currentPersonaVersion();
+    // No active version means nothing to mirror. Leave the field alone rather
+    // than wiping text the user may still want.
+    if (!version?.name) return;
+    if (nativeVersionLabel(type) === version.name) return;
+    await writeNativeVersionLabel(type, version.name, { persist });
+}
+
+/**
+ * The native fields are read-only while mirroring owns them. The persona title
+ * only exists inside the rename popup, so that one is locked when it appears.
+ */
+function refreshNameMirrorLocks() {
+    const locked = isNameMirrorEnabled('character');
+    const field = $('#character_version_textarea');
+    field.prop('readonly', locked).toggleClass('ocs-name-mirror-locked', locked);
+    if (locked) field.attr('title', '「角色版本」正由一键快照的版本名同步接管，如需手动修改请先在版本管理器里关闭同步。');
+    else if (field.attr('title')?.startsWith('「角色版本」正由')) field.removeAttr('title');
+}
+
+/** Locks the persona title input inside SillyTavern's rename popup. */
+function installPersonaTitleLock() {
+    new MutationObserver(() => {
+        if (!isNameMirrorEnabled('persona')) return;
+        const input = document.querySelector('dialog.popup #persona_title');
+        if (!(input instanceof HTMLInputElement) || input.readOnly) return;
+        input.readOnly = true;
+        input.title = '「备注」正由一键快照的版本名同步接管，如需手动修改请先在版本管理器里关闭同步。';
+    }).observe(document.body, { childList: true, subtree: true });
 }
 
 function refreshVersionIndicators() {
@@ -1255,6 +1364,12 @@ async function applyCharacter(state, versionId = null, { persist = true, preserv
     delete data.extensions.regex_scripts;
     if (hasCurrentScopedRegex) data.extensions.regex_scripts = currentScopedRegex;
     data.extensions.one_click_snapshot = { ...currentSnapshotExtension, versionId };
+    // Ride along with the save this function already performs instead of
+    // writing the character card a second time.
+    if (versionId && isNameMirrorEnabled('character', character.avatar)) {
+        const mirrored = characterVersions().find(version => version.id === versionId)?.name;
+        if (mirrored) data.character_version = mirrored;
+    }
     if (preserveGreetingCatalog) {
         if (liveGreetingCatalog?.hasAlternateGreetings) data.alternate_greetings = deepClone(liveGreetingCatalog.alternateGreetings);
         else delete data.alternate_greetings;
@@ -2097,6 +2212,16 @@ function greetingLabelFromKey(key) {
     return alternate ? `备选开场白 ${Number(alternate[1]) + 1}` : null;
 }
 
+function syncGreetingBindingLabel(character, entry) {
+    const record = character?.avatar ? settings().greetingBindings[character.avatar]?.[entry?.key] : null;
+    if (!record) return;
+    const label = greetingDisplayLabel(entry);
+    if (record.label === label && record.characterName === character.name) return;
+    record.label = label;
+    record.characterName = character.name;
+    saveSettingsDebounced();
+}
+
 function saveGreetingCatalogState(character, catalog) {
     character.data ??= {};
     character.data.extensions ??= {};
@@ -2132,6 +2257,7 @@ async function editGreetingMetadata(character, catalog, entry, field) {
     if (value === null) return;
     entry.metadata[field] = String(value).trim();
     saveGreetingCatalogState(character, catalog);
+    if (isName) syncGreetingBindingLabel(character, entry);
     scheduleNativeGreetingDecoration();
 }
 
@@ -2639,16 +2765,18 @@ function snapshotGreetingBindings(snapshotId) {
     let migrated = false;
     const bindings = Object.entries(settings().greetingBindings).flatMap(([avatar, records]) => {
         const character = characters.find(item => item?.avatar === avatar);
-        const candidates = greetingCandidates(character);
+        // The landing-page character list can be a lightweight copy without
+        // our saved greeting metadata. In that case its fallback “#N” labels
+        // are not authoritative, so keep the label stored with the binding.
+        const hasGreetingCatalog = Array.isArray(character?.data?.extensions?.one_click_snapshot?.greetingCatalog?.entries);
+        const candidates = hasGreetingCatalog ? greetingCandidates(character) : [];
         const matchingBindings = Object.entries(records ?? {})
             .filter(([, record]) => record?.snapshotId === snapshotId)
             .map(([key, record]) => {
                 const liveLabel = candidates.find(candidate => candidate.key === key)?.label;
-                // Old bindings did not store their display label. When the
-                // full character card happens to be loaded, backfill it once
-                // so opening the library from the landing page never needs
-                // to guess from a lightweight character list again.
-                if (!record.label && liveLabel) {
+                // When the full character card is available, its current
+                // name is the source of truth and also refreshes old records.
+                if (liveLabel && record.label !== liveLabel) {
                     record.label = liveLabel;
                     migrated = true;
                 }
@@ -2903,8 +3031,11 @@ async function applyVersion(type, versionId) {
     const version = context.list.find(item => item.id === versionId);
     if (!version) return;
     await context.apply(version.data, version.id);
+    // The character path already mirrored the name into the card it just saved.
+    if (type === 'persona') await applyNameMirror('persona');
     saveSettingsDebounced();
     refreshVersionIndicators();
+    refreshNameMirrorLocks();
 }
 
 async function openVersionQuickSwitcher(type) {
@@ -2980,6 +3111,10 @@ async function renameVersion(type, versionId) {
     syncSnapshotVersionName(type, version.id, version.name);
     version.updatedAt = Date.now();
     saveSettingsDebounced();
+    // Renaming the active version must move the mirrored label with it.
+    if (version.id === (type === 'character' ? currentCharacterVersion() : currentPersonaVersion())?.id) {
+        await applyNameMirror(type);
+    }
     refreshVersionIndicators();
 }
 
@@ -3240,18 +3375,60 @@ async function openVersionManager(type) {
     const context = versionContext(type);
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
-    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button></div><div class="ocs-version-list"></div></div>`);
+    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button><button class="ocs-button ocs-version-name-mirror"></button></div><div class="ocs-version-list"></div></div>`);
     const expandedVersionIds = new Set();
     let expansionInitialized = false;
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
         const enabled = settings().autoSyncVersions === true;
-        syncButton.toggleClass('ocs-auto-sync-enabled', enabled).html(`<i class="fa-solid ${enabled ? 'fa-toggle-on' : 'fa-toggle-off'}"></i> 自动同步：${enabled ? '开' : '关'}`).attr('title', '开启后，原生描述框的修改会自动保存到当前应用版本。');
+        syncButton.toggleClass('ocs-auto-sync-enabled', enabled).html(`<i class="fa-solid ${enabled ? 'fa-toggle-on' : 'fa-toggle-off'}"></i> 同步描述到版本`).attr('title', '开启后，原生描述框的修改会自动保存到当前应用版本。');
     };
     syncButton.on('click', () => {
         settings().autoSyncVersions = !settings().autoSyncVersions;
         saveSettingsDebounced();
         renderAutoSyncButton();
+    });
+
+    const nativeFieldName = type === 'character' ? '角色版本' : '备注';
+    const mirrorButton = root.find('.ocs-version-name-mirror');
+    const renderMirrorButton = () => {
+        const enabled = isNameMirrorEnabled(type);
+        mirrorButton
+            .toggleClass('ocs-auto-sync-enabled', enabled)
+            .html(`<i class="fa-solid ${enabled ? 'fa-toggle-on' : 'fa-toggle-off'}"></i> 同步名称到${nativeFieldName}`)
+            .attr('title', `开启后，当前版本的名称会实时写入原生「${nativeFieldName}」，列表里就能直接看到正在用哪个版本。开启期间该字段不可手动修改。`);
+    };
+    mirrorButton.on('click', async () => {
+        const owner = nameMirrorOwner(type);
+        if (!owner) return;
+        const store = nameMirrorStore(type);
+
+        if (isNameMirrorEnabled(type, owner)) {
+            const previous = String(store[owner]?.previous ?? '');
+            delete store[owner];
+            saveSettingsDebounced();
+            if (previous && previous !== nativeVersionLabel(type)) {
+                const restore = await Popup.show.confirm('关闭同步', `是否把「${nativeFieldName}」恢复成开启同步前的内容？<br><br>原值：${previous || '（空）'}<br>当前：${nativeVersionLabel(type) || '（空）'}`);
+                if (restore) await writeNativeVersionLabel(type, previous);
+            }
+            renderMirrorButton();
+            refreshNameMirrorLocks();
+            return;
+        }
+
+        const current = nativeVersionLabel(type);
+        const version = type === 'character' ? currentCharacterVersion() : currentPersonaVersion();
+        if (current && current !== version?.name) {
+            const overwrite = await Popup.show.confirm('覆盖现有内容', `「${nativeFieldName}」当前是「${current}」，开启同步会用版本名覆盖它。<br><br>关闭同步时可以恢复回来。要继续吗？`);
+            if (!overwrite) return;
+        }
+
+        store[owner] = { previous: current };
+        saveSettingsDebounced();
+        await applyNameMirror(type);
+        renderMirrorButton();
+        refreshNameMirrorLocks();
+        render();
     });
     const render = () => {
         const list = root.find('.ocs-version-list').empty();
@@ -3314,6 +3491,7 @@ async function openVersionManager(type) {
     };
     $(document).on('oneClickSnapshotVersionAutoSynced.oneClickSnapshotVersionUi', autoSyncRenderHandler);
     renderAutoSyncButton();
+    renderMirrorButton();
     render();
     await showOcsPopup(root);
     $(nativeSelector).off('input.oneClickSnapshotVersion');
@@ -3696,14 +3874,24 @@ function renderSnapshotList(root) {
     const expandedGroups = new Set(root.find('.ocs-snapshot-group[open]').toArray().map(element => element.dataset.ocsGroup));
     const list = root.find('.ocs-snapshot-list').empty();
     const filter = String(root.find('.ocs-library-filter').val() ?? '__all__');
+    const query = String(root.find('.ocs-library-search').val() ?? '').trim().toLocaleLowerCase();
+    const searching = Boolean(query);
+    const wasSearching = root.data('ocsLibrarySearching') === true;
+    if (searching && !wasSearching) root.data('ocsLibraryExpandedBeforeSearch', [...expandedGroups]);
+    root.data('ocsLibrarySearching', searching);
+    const restoredGroups = !searching && wasSearching
+        ? new Set(root.data('ocsLibraryExpandedBeforeSearch') ?? [])
+        : expandedGroups;
+    if (!searching && wasSearching) root.removeData('ocsLibraryExpandedBeforeSearch');
     const activeSnapshotId = currentAppliedSnapshotId();
     const snapshots = [...settings().snapshots]
         .filter(snapshot => filter === '__all__' || (snapshot.group ?? '') === filter)
+        .filter(snapshot => !query || `${snapshot.name ?? ''} ${snapshot.group ?? ''}`.toLocaleLowerCase().includes(query))
         .sort((a, b) => {
             const currentOrder = Number(b.id === activeSnapshotId) - Number(a.id === activeSnapshotId);
             return currentOrder || b.updatedAt - a.updatedAt;
         });
-    if (!snapshots.length) return list.append('<div class="ocs-empty">这个分组还没有快照。</div>');
+    if (!snapshots.length) return list.append(`<div class="ocs-empty">${query ? '没有匹配的快照。' : '这个分组还没有快照。'}</div>`);
     const grouped = new Map();
     for (const snapshot of snapshots) {
         const group = snapshot.group || '未分组';
@@ -3822,7 +4010,7 @@ function renderSnapshotList(root) {
     }
     for (const [group, items] of grouped) {
         const section = $('<details class="ocs-snapshot-group"></details>');
-        section.attr('data-ocs-group', group).prop('open', expandedGroups.has(group) || items.some(snapshot => snapshot.id === activeSnapshotId));
+        section.attr('data-ocs-group', group).prop('open', searching || restoredGroups.has(group) || items.some(snapshot => snapshot.id === activeSnapshotId));
         section.append($('<summary></summary>').text(`${group} · ${items.length}`));
         section.append(renderCards(items));
         list.append(section);
@@ -3866,7 +4054,7 @@ async function openSnapshotPopup() {
                     </div>
                     <button class="ocs-button ocs-primary ocs-capture-button"><i class="fa-solid fa-camera"></i> 保存快照</button>
                 </section>
-                <section class="ocs-library"><div class="ocs-library-heading"><div><h4>快照库</h4></div><select class="text_pole ocs-library-filter"></select></div><div class="ocs-snapshot-list"></div></section>
+                <section class="ocs-library"><div class="ocs-library-heading"><div><h4>快照库</h4></div><div class="ocs-library-controls"><input class="text_pole ocs-library-search" type="search" placeholder="搜索快照名称"><select class="text_pole ocs-library-filter"></select></div></div><div class="ocs-snapshot-list"></div></section>
             </div>
         </div>`);
     const applyCaptureScopeSelection = () => {
@@ -3916,6 +4104,7 @@ async function openSnapshotPopup() {
     });
     root.find('.ocs-scope-grid input[type="checkbox"]').on('change', rememberCaptureScopeSelection);
     root.find('.ocs-library-filter').on('change', () => renderSnapshotList(root));
+    root.find('.ocs-library-search').on('input', () => renderSnapshotList(root));
     root.find('.ocs-mobile-page-tab').on('click', event => {
         event.preventDefault();
         setSnapshotMobilePage(root, String($(event.currentTarget).data('ocsPage')));
@@ -4189,6 +4378,11 @@ $(async () => {
     installVersionMenu();
     installGreetingCatalogIntegration();
     installVersionAutoSync();
+    installPersonaManager(settings);
+    installPersonaTitleLock();
+    eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
+    eventSource.on(event_types.PERSONA_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
+    setTimeout(refreshNameMirrorLocks, 0);
     eventSource.on(event_types.SETTINGS_UPDATED, refreshConnectionStatusDisplay);
     eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
     eventSource.on(event_types.CHAT_RENAMED, updateChatBindingAfterRename);

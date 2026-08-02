@@ -66,11 +66,16 @@
 .ocs-primary { border-color: var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 16%, var(--SmartThemeBlurTintColor, #222)); }
 .ocs-danger { color: #f2b3b3; border-color: #8f5050; }
 
-.ocs-library { min-width: 0; }
-.ocs-library-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 10px; }
-.ocs-library-filter { width: auto; max-width: 150px; font-size: .86em; }
-.ocs-snapshot-list { display: grid; gap: 11px; }
-.ocs-snapshot-group { padding-bottom: 9px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
+.ocs-library { display: flex; flex-direction: column; min-width: 0; gap: 12px; }
+.ocs-library-heading { margin: 0; }
+.ocs-library-heading h4 { margin: 0 0 8px; }
+.ocs-library-controls { display: flex; align-items: center; width: 100%; min-width: 0; gap: 7px; }
+.ocs-library-search,
+.ocs-library-filter { box-sizing: border-box; min-height: 32px; margin: 0 !important; font: inherit !important; font-size: .86em !important; line-height: 1.2; }
+.ocs-library-search { flex: 1 1 0; width: auto; min-width: 0; text-align: left; }
+.ocs-library-filter { flex: 0 0 clamp(118px, 16vw, 154px); width: clamp(118px, 16vw, 154px); max-width: 40%; }
+.ocs-snapshot-list { display: grid; gap: 12px; }
+.ocs-snapshot-group { padding: 0; border: 0; }
 .ocs-snapshot-group > summary,
 .ocs-version-card > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
 .ocs-snapshot-group > summary::-webkit-details-marker,
@@ -80,7 +85,7 @@
 .ocs-snapshot-group:not([open]) > summary::after,
 .ocs-version-card:not([open]) > summary::after { transform: rotate(-90deg); }
 .ocs-snapshot-group > summary { margin: 0 0 8px; font-size: .86em; font-weight: 700; }
-.ocs-snapshot-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
+.ocs-snapshot-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 10px; }
 .ocs-snapshot-card { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: 10px; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 7px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 26%, transparent); }
 .ocs-snapshot-card.ocs-bound { border-left: 3px solid var(--SmartThemeQuoteColor, #9cc); }
 .ocs-card-header { display: flex; align-items: flex-start; justify-content: space-between; width: 100%; gap: 8px; }
@@ -107,7 +112,7 @@
 .ocs-group-picker-new-label { display: grid; gap: 5px; margin: 2px 0 0; font-size: .84em; }
 .ocs-group-picker-select,
 .ocs-group-picker-new { box-sizing: border-box; width: 100%; min-width: 0; }
-.ocs-card-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+.ocs-card-actions { display: flex; flex-wrap: wrap; width: 100%; min-width: 0; gap: 5px; margin-top: 9px; }
 .ocs-card-actions .ocs-button { min-height: 28px; padding: 4px 7px; font-size: .72em; }
 .ocs-empty { padding: 12px 2px; opacity: .68; font-size: .85em; }
 .ocs-greeting-choice { display: grid; gap: 9px; min-width: min(420px, 78vw); }
@@ -145,7 +150,7 @@
 .ocs-native-greeting-number { margin-left: 3px; opacity: .5; font-size: .76em; font-weight: 400; }
 .ocs-native-greeting-group-badge { max-width: 12em; margin-left: 2px; padding: 1px 5px; overflow: hidden; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 36%, transparent); color: var(--SmartThemeQuoteColor, inherit); font-size: .7em; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 
-.ocs-contents-popup { max-width: 680px; text-align: left !important; }
+.ocs-contents-popup { width: 100%; max-width: none; text-align: left !important; }
 .ocs-dialog .ocs-contents-popup,
 .ocs-dialog .ocs-contents-popup * { text-align: left !important; }
 .ocs-contents-popup h3 { margin-bottom: 14px; font-size: 1.28em; }
@@ -268,6 +273,45 @@
 .ocs-version-diff-empty { opacity: .58; font-style: italic; }
 .ocs-native-version-hint { display: inline-block; margin: 0 5px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; line-height: 1.2; overflow-wrap: anywhere; vertical-align: middle; white-space: normal; opacity: .9; }
 
+/* Persona management: tag filters, folders, favorites and bulk selection. */
+#persona_sort_order { min-width: 7.2em; max-width: 10em; }
+#ocs_persona_tag_controls { display: flex; flex-wrap: wrap; align-items: center; margin-bottom: 5px; }
+#ocs_persona_tag_filter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; width: 100%; }
+#ocs_persona_tag_filter .tag { cursor: pointer; }
+#ocs_persona_folders:empty { display: none; }
+#ocs_persona_folders { display: flex; flex-direction: column; gap: 5px; margin-bottom: 5px; }
+#ocs_persona_folders .bogus_folder_select { cursor: pointer; }
+
+#ocs_persona_tags { margin-bottom: 5px; }
+#ocs_persona_tags .tag_controls { display: flex; align-items: center; gap: 5px; }
+#ocs_persona_tag_list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+#ocs_persona_tag_list:empty { margin-top: 0; }
+#ocs_persona_favorite { opacity: .45; }
+#ocs_persona_favorite.ocs-persona-fav-on { color: var(--golden, #ffd700); opacity: 1; }
+
+/* Tags share the name row and sit just left of the title. `.ch_name` keeps its
+   stock `flex: 1 1 auto`, so it absorbs the free space and pushes the tags and
+   the title to the right edge. The tag strip must shrink rather than grow —
+   giving it any intrinsic width is what crushed the name into an ellipsis. */
+/* `.tags_inline` ships with `max-height: 66%` + `overflow: hidden`, sized for a
+   card row of its own. Inside the one-line name block that 66% lops off the
+   bottom of every chip, so the cap has to go. Chips stay on one line and clip
+   horizontally instead of wrapping the row open. */
+#user_avatar_block .ocs-persona-card-tags { display: flex; flex: 0 1 auto; flex-wrap: nowrap; align-self: center; align-items: center; gap: 3px; min-width: 0; max-height: none; }
+#user_avatar_block .ocs-persona-card-tags:empty { display: none; }
+#user_avatar_block .ocs-persona-card-tags .tag { max-width: 12em; }
+#user_avatar_block .ocs-persona-card-tags .tag_name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#user_avatar_block .avatar-container.ocs-persona-fav .avatar { box-shadow: 0 0 0 2px var(--golden, #ffd700); }
+
+/* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
+   a flat grey wash over every card, the theme quote color for the selected
+   ones, and no checkbox of its own. */
+#user_avatar_block.ocs-persona-bulk-mode .avatar-container { cursor: pointer; background-color: rgba(170, 170, 170, .15); transition: background-color var(--animation-duration-3x, .3s) ease; }
+#user_avatar_block.ocs-persona-bulk-mode .avatar-container.ocs-persona-selected { background-color: var(--SmartThemeQuoteColor); }
+#user_avatar_block.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
+#ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
+#ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select:hover { background: none; }
+
 @media (max-width: 700px) {
     /* Same approach as Timeline Memory: only neutralize the wide popup's
        minimum width. Native <dialog> centering remains untouched, so a
@@ -305,9 +349,12 @@
     .ocs-popup:not(.ocs-mobile-page-library) .ocs-library { display: none; }
     .ocs-capture > h4,
     .ocs-library-heading h4 { display: none; }
-    .ocs-library-heading { margin: 0 0 8px; }
+    .ocs-library-heading { margin: 0; }
+    .ocs-library-heading h4 { margin: 0; }
+    .ocs-library-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .78fr); width: 100%; gap: 5px; }
+    .ocs-library-search,
+    .ocs-library-filter { box-sizing: border-box; width: 100%; min-width: 0; max-width: none; min-height: 32px; }
     .ocs-capture { padding: 11px; }
-    .ocs-library-heading { margin-top: 2px; }
     .ocs-snapshot-card { padding: 9px; }
     .ocs-card-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; gap: 5px; }
     .ocs-card-actions .ocs-button { width: 100% !important; min-width: 0; padding: 5px 3px; white-space: normal !important; }
