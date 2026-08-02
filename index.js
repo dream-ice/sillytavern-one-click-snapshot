@@ -166,13 +166,13 @@ function refreshVersionIndicators() {
     $('#one_click_snapshot_character_version_hint, #one_click_snapshot_persona_version_hint').remove();
     const characterVersion = currentCharacterVersion();
     if (characterVersion?.name) {
-        const hint = $('<span id="one_click_snapshot_character_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${characterVersion.name}`);
+        const hint = $('<span id="one_click_snapshot_character_version_hint" class="ocs-native-version-hint"></span>').text(characterVersion.name);
         const title = $('#description_div > .flex-container').first();
         title.append(hint);
     }
     const personaVersion = currentPersonaVersion();
     if (personaVersion?.name) {
-        const hint = $('<span id="one_click_snapshot_persona_version_hint" class="ocs-native-version-hint"></span>').text(`当前版本：${personaVersion.name}`);
+        const hint = $('<span id="one_click_snapshot_persona_version_hint" class="ocs-native-version-hint"></span>').text(personaVersion.name);
         const title = $('#persona_description').prevAll('h4').first();
         title.append(hint);
     }
@@ -3834,12 +3834,22 @@ function renderGroups(root) {
     fillGroupSelect(root.find('.ocs-library-filter'), { all: true });
 }
 
+function setSnapshotMobilePage(root, page) {
+    const library = page === 'library';
+    root.toggleClass('ocs-mobile-page-library', library);
+    root.find('.ocs-mobile-page-tab').each((_, element) => {
+        const active = String($(element).data('ocsPage')) === page;
+        $(element).toggleClass('is-active', active).attr('aria-selected', active ? 'true' : 'false');
+    });
+}
+
 async function openSnapshotPopup() {
     await pruneMissingCharacterChatBindings();
     if (pruneSnapshotGroups()) saveSettingsDebounced();
     const root = $(
         `<div class="ocs-popup">
             <header class="ocs-popup-header"><div><span class="ocs-kicker">SNAPSHOT LIBRARY</span><h3>一键快照</h3></div></header>
+            <div class="ocs-mobile-page-tabs" role="tablist" aria-label="一键快照页面"><button type="button" class="ocs-mobile-page-tab is-active" role="tab" aria-selected="true" data-ocs-page="capture">保存当前状态</button><button type="button" class="ocs-mobile-page-tab" role="tab" aria-selected="false" data-ocs-page="library">快照库</button></div>
             <div class="ocs-workspace">
                 <section class="ocs-capture">
                     <h4>保存当前状态</h4>
@@ -3906,6 +3916,10 @@ async function openSnapshotPopup() {
     });
     root.find('.ocs-scope-grid input[type="checkbox"]').on('change', rememberCaptureScopeSelection);
     root.find('.ocs-library-filter').on('change', () => renderSnapshotList(root));
+    root.find('.ocs-mobile-page-tab').on('click', event => {
+        event.preventDefault();
+        setSnapshotMobilePage(root, String($(event.currentTarget).data('ocsPage')));
+    });
     applyCaptureScopeSelection();
     renderGroups(root); renderSnapshotList(root);
     await showOcsPopup(root);
