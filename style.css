@@ -285,7 +285,15 @@
    to claim a full row of their own. The card itself is left alone — whatever
    width the stock list or grid rules give it stays correct. */
 #user_avatar_block .ocs-persona-current-label { flex: 0 0 100%; margin: 0 0 3px; color: var(--SmartThemeQuoteColor); font-size: .78em; letter-spacing: .08em; opacity: .9; }
-#user_avatar_block .ocs-persona-current-sep { flex: 0 0 100%; height: 0; margin: 7px 0; border-top: 1px solid var(--SmartThemeBorderColor); }
+/* Derived from the body color rather than --SmartThemeBorderColor: plenty of
+   themes flatten that variable to transparent, which made the divider vanish.
+   The body color always contrasts with the background, since it has to be
+   readable there. */
+/* 1px top and bottom, matching the 2px that normally separates two cards
+   (`.avatar-container` is `margin: 1px`, and flex margins do not collapse).
+   The row then reads as the usual gap with a line drawn through it, rather
+   than as an extra block of whitespace. */
+#user_avatar_block .ocs-persona-current-sep { flex: 0 0 100%; height: 0; margin: 1px 0; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 28%, transparent); }
 #ocs_persona_folders:empty { display: none; }
 #ocs_persona_folders { display: flex; flex-direction: column; gap: 5px; margin-bottom: 5px; }
 #ocs_persona_folders .bogus_folder_select { cursor: pointer; }
@@ -314,12 +322,21 @@
    Deliberately `box-shadow` rather than `outline` — the golden outline is drawn
    outside the border box, so a persona that is both default and favorite shows
    two concentric rings instead of one overwriting the other. */
-/* Wrapped in `:where()` so both rules carry almost no specificity and a user
-   theme can restyle or switch them off without an escalation war: `:where()`
-   contributes 0, leaving the variable at 0 and the ring at (1 id, 1 class).
-   Any ordinary theme rule outweighs that regardless of load order. */
+/* Drawn as a pseudo-element rather than a `box-shadow` on `.avatar`: themes
+   routinely put their own glow there, which silently wiped the marker out.
+   Nothing in SillyTavern styles `.avatar::after`, so this collides with far
+   less — while a theme that deliberately targets `.ocs-persona-fav` still wins,
+   because `:where()` keeps this rule at (1 id, 1 class). */
 :where(#user_avatar_block) { --ocs-persona-fav-color: rgb(236, 106, 160); }
-#user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar { box-shadow: 0 0 0 3px var(--ocs-persona-fav-color); }
+#user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar { position: relative; }
+#user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border: 3px solid var(--ocs-persona-fav-color);
+    border-radius: inherit;
+    pointer-events: none;
+}
 
 /* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
    a flat grey wash over every card, the theme quote color for the selected
