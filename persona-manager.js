@@ -14,12 +14,12 @@
  * folder types and the shared Tag Management dialog all keep working. Only
  * the persona -> tag assignment lives in this extension's settings.
  */
-import { chat, characters, chat_metadata, eventSource, event_types, getRequestHeaders, printCharactersDebounced, saveMetadata, saveSettingsDebounced } from '../../../../script.js';
-import { groups } from '../../../group-chats.js';
+import { chat, characters, chat_metadata, eventSource, event_types, getRequestHeaders, getThumbnailUrl, printCharactersDebounced, saveMetadata, saveSettingsDebounced, this_chid } from '../../../../script.js';
+import { groups, selected_group } from '../../../group-chats.js';
 import { power_user } from '../../../power-user.js';
 import { getTokenCountAsync } from '../../../tokenizers.js';
 import { renderTemplateAsync } from '../../../templates.js';
-import { buildPersonaAvatarList, getUserAvatars, personasFilter, setUserAvatar, user_avatar } from '../../../personas.js';
+import { buildPersonaAvatarList, getConnectedPersonas, getUserAvatars, personasFilter, setUserAvatar, user_avatar } from '../../../personas.js';
 import { TAG_FOLDER_DEFAULT_TYPE, TAG_FOLDER_TYPES, appendTagToList, applyCharacterTagsToMessageDivs, compareTagsForSort, printTagList, sortTags, tag_map, tags } from '../../../tags.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from '../../../popup.js';
 import { uuidv4 } from '../../../utils.js';
@@ -89,6 +89,7 @@ function state() {
     const value = root[STATE_KEY];
     value.meta ??= {};
     value.showTagFilters ??= false;
+    value.pinCurrent ??= true;
     value.usage ??= { completedAt: 0, counts: {} };
     value.usage.counts ??= {};
     return value;
@@ -586,6 +587,12 @@ function shuffle(items) {
 function filterPersonas(avatarIds) {
     let result = [...avatarIds];
 
+    // The pinned cards render these above the list, so drop them here to avoid
+    // duplicates. Filters run before SillyTavern sorts, so this holds for every
+    // sort order, including the built-in A-Z / Z-A / search.
+    const pinned = new Set(pinnedPersonaIds().ids);
+    if (pinned.size) result = result.filter(avatarId => !pinned.has(avatarId));
+
     if (selectedTagIds.size) {
         result = result.filter(avatarId => {
             const assigned = personaTagIds(avatarId);
@@ -686,7 +693,11 @@ function installPanelChrome() {
         '<i id="ocs_persona_usage_refresh" class="fa-solid fa-arrows-rotate menu_button" title="重新扫描聊天记录，更新用户角色的消息层数"></i>' +
         '<i id="ocs_persona_bulk_edit" class="fa-solid fa-pen-to-square menu_button" title="批量编辑用户角色"></i>' +
         '<div id="ocs_persona_bulk_count" class="paginationjs-nav"></div>' +
+        // Same order as the character context menu: 收藏 / 标签 / 复制, then the trash.
         '<i id="ocs_persona_bulk_all" class="fa-solid fa-check-double menu_button" title="全选当前页" style="display:none;"></i>' +
+        '<i id="ocs_persona_bulk_favorite" class="fa-solid fa-star menu_button" title="收藏 / 取消收藏选中的用户角色" style="display:none;"></i>' +
+        '<i id="ocs_persona_bulk_tag" class="fa-solid fa-tags menu_button" title="给选中的用户角色批量打标签" style="display:none;"></i>' +
+        '<i id="ocs_persona_bulk_duplicate" class="fa-solid fa-clone menu_button" title="复制选中的用户角色" style="display:none;"></i>' +
         '<i id="ocs_persona_bulk_delete" class="fa-solid fa-trash menu_button red_button" title="删除选中的用户角色" style="display:none;"></i>',
     );
 
@@ -698,6 +709,9 @@ function installPanelChrome() {
     $('#ocs_persona_usage_refresh').on('click', () => void scanUsageCounts().then(refreshList));
     $('#ocs_persona_bulk_edit').on('click', toggleBulkMode);
     $('#ocs_persona_bulk_all').on('click', selectAllVisible);
+    $('#ocs_persona_bulk_favorite').on('click', toggleSelectedPersonaFavorites);
+    $('#ocs_persona_bulk_tag').on('click', () => void editSelectedPersonaTags());
+    $('#ocs_persona_bulk_duplicate').on('click', () => void duplicateSelectedPersonas());
     $('#ocs_persona_bulk_delete').on('click', () => void deleteSelectedPersonas());
 
     renderFilterRow();
@@ -750,6 +764,14 @@ function renderFilterRow() {
             renderFilterRow();
         });
 
+    const pinned = state().pinCurrent !== false;
+    appendAction({ id: 'ocs-filter-pin', name: pinned ? '当前角色绑定的用户已置顶，点击取消' : '把当前角色绑定的用户置顶', color: 'rgba(150, 100, 100, 0.5)', icon: 'fa-solid fa-thumbtack' },
+        pinned ? FILTER_STATE.SELECTED : FILTER_STATE.UNDEFINED, () => {
+            state().pinCurrent = !pinned;
+            saveSettingsDebounced();
+            refreshFilterUi();
+        });
+
     appendAction({ id: 'ocs-filter-clear', name: '清除所有筛选', color: 'transparent', icon: 'fa-solid fa-filter-circle-xmark' },
         FILTER_STATE.UNDEFINED, () => {
             clearFilters();
@@ -784,6 +806,85 @@ function renderFilterRow() {
         });
         container.append(chip);
     }
+}
+
+/**
+ * Replicates SillyTavern's `getPersonaStates`, which is module-private. The
+ * pinned card lives outside `#user_avatar_block`, so `updatePersonaUIStates`
+ * never reaches it and these badges have to be applied here.
+ *
+ * @param {string} avatarId Persona avatar file name
+ */
+function applyPersonaStateClasses(card, avatarId) {
+    const connections = power_user.persona_descriptions?.[avatarId]?.connections;
+    const hasCharLock = Boolean(connections?.some(connection =>
+        (!selected_group && connection.type === 'character' && connection.id === characters[Number(this_chid)]?.avatar)
+        || (selected_group && connection.type === 'group' && connection.id === selected_group)));
+
+    card.toggleClass('default_persona', power_user.default_persona === avatarId)
+        .toggleClass('locked_to_chat', chat_metadata.persona == avatarId)
+        .toggleClass('locked_to_character', hasCharLock)
+        .toggleClass('selected', avatarId === user_avatar);
+}
+
+/**
+ * The personas to keep at the top of the list.
+ *
+ * Deliberately the ones *bound to what you are doing now*, not the one merely
+ * selected: the point is to still reach the persona a character is linked to
+ * after switching away to crib from an older one. Falls back to the persona in
+ * use so the row stays useful for people who never link personas at all.
+ *
+ * @returns {{ids: string[], bound: boolean}}
+ */
+function pinnedPersonaIds() {
+    if (state().pinCurrent === false) return { ids: [], bound: false };
+
+    const ids = new Set();
+    // The chat lock is the most specific binding, so it leads.
+    if (chat_metadata.persona && power_user.personas?.[chat_metadata.persona]) ids.add(chat_metadata.persona);
+    for (const avatarId of getConnectedPersonas() ?? []) {
+        if (power_user.personas?.[avatarId]) ids.add(avatarId);
+    }
+    if (ids.size) return { ids: [...ids], bound: true };
+
+    if (user_avatar && power_user.personas?.[user_avatar]) return { ids: [user_avatar], bound: false };
+    return { ids: [], bound: false };
+}
+
+/**
+ * Pins the bound personas to the top of the list.
+ *
+ * Cards are prepended *inside* `#user_avatar_block` rather than into a
+ * container of their own: that block is a `flex-wrap` row with its own padding,
+ * and a card outside it loses that layout context — it overflows to the right
+ * and its name gets ellipsed. Living inside also means every stock rule, the
+ * grid view and any user theme scoped to `#user_avatar_block` still apply.
+ *
+ * They are not part of the paginated data, so no sort order can move them. The
+ * filter drops the same personas from the list to avoid showing them twice.
+ */
+function renderCurrentPersonaRow() {
+    const list = $('#user_avatar_block');
+    list.find('.ocs-persona-current-label, .ocs-persona-current-card, .ocs-persona-current-sep').remove();
+
+    const { ids, bound } = pinnedPersonaIds();
+    if (!ids.length) return;
+
+    const cards = ids.map(avatarId => {
+        const card = $('#user_avatar_template .avatar-container').clone().addClass('ocs-persona-current-card');
+        card.attr('data-avatar-id', avatarId);
+        card.find('.avatar').attr({ 'data-avatar-id': avatarId, title: avatarId });
+        card.find('img').attr('src', getThumbnailUrl('persona', avatarId));
+        card.find('.ch_name').text(power_user.personas[avatarId] || avatarId);
+        card.find('.ch_additional_info').text(power_user.persona_descriptions?.[avatarId]?.title || '');
+        card.find('.ch_description').text(power_user.persona_descriptions?.[avatarId]?.description || list.attr('no_desc_text') || '');
+        applyPersonaStateClasses(card, avatarId);
+        return card;
+    });
+
+    const label = $('<div class="ocs-persona-current-label"></div>').text(bound ? '当前角色绑定' : '当前使用');
+    list.prepend(label, ...cards, $('<div class="ocs-persona-current-sep"></div>'));
 }
 
 /**
@@ -835,6 +936,28 @@ function renderFolderRow() {
 }
 
 /**
+ * Adds the favorite marker, bulk selection state and tag chips to one card.
+ * @param {JQuery<HTMLElement>} card A `.avatar-container`
+ * @param {string} avatarId Persona avatar file name
+ */
+function decorateCard(card, avatarId) {
+    card.toggleClass('ocs-persona-fav', meta(avatarId).favorite === true);
+    card.toggleClass('ocs-persona-selected', bulkSelection.has(avatarId));
+
+    let chips = card.find('.ocs-persona-card-tags');
+    if (!chips.length) {
+        chips = $('<div class="ocs-persona-card-tags tags tags_inline"></div>');
+        // Tags belong between the name and the title. The name block is a
+        // nowrap flex row, so the stylesheet keeps the strip shrink-only
+        // instead of letting it crush the name into an ellipsis.
+        const title = card.find('.character_name_block .ch_additional_info').first();
+        if (title.length) title.before(chips);
+        else card.find('.character_name_block').append(chips);
+    }
+    printTagList(chips, { tags: personaTags(avatarId), empty: 'always', tagOptions: { isCharacterList: true } });
+}
+
+/**
  * Adds tag chips, the favorite marker and the bulk checkbox to persona cards
  * after SillyTavern has rendered them.
  */
@@ -846,25 +969,13 @@ function decorateCards() {
     $('#ocs_persona_folders').toggleClass('ocs-persona-bulk-mode', bulkMode);
     pruneOrphanedMeta();
 
+    // Add the pinned card first so the pass below decorates it like any other.
+    renderCurrentPersonaRow();
+
     list.find('.avatar-container[data-avatar-id]').each((_, node) => {
         const card = $(node);
         const avatarId = String(card.attr('data-avatar-id'));
-        if (!avatarId || !power_user.personas?.[avatarId]) return;
-
-        card.toggleClass('ocs-persona-fav', meta(avatarId).favorite === true);
-        card.toggleClass('ocs-persona-selected', bulkSelection.has(avatarId));
-
-        let chips = card.find('.ocs-persona-card-tags');
-        if (!chips.length) {
-            chips = $('<div class="ocs-persona-card-tags tags tags_inline"></div>');
-            // Tags belong between the name and the title. The name block is a
-            // nowrap flex row by default, so the stylesheet lets it wrap for
-            // personas instead of ellipsing all three against each other.
-            const title = card.find('.character_name_block .ch_additional_info').first();
-            if (title.length) title.before(chips);
-            else card.find('.character_name_block').append(chips);
-        }
-        printTagList(chips, { tags: personaTags(avatarId), empty: 'always', tagOptions: { isCharacterList: true } });
+        if (avatarId && power_user.personas?.[avatarId]) decorateCard(card, avatarId);
     });
 
     renderFolderRow();
@@ -1057,8 +1168,10 @@ function installTagDeleteOverride() {
 
 function updateBulkControls() {
     const count = bulkSelection.size;
-    $('#ocs_persona_bulk_count').text(count ? String(count) : '').toggle(bulkMode && count > 0);
-    $('#ocs_persona_bulk_all, #ocs_persona_bulk_delete').toggle(bulkMode);
+    // Always show the number in bulk mode, zero included — this is what the
+    // character list's `#bulkSelectedCount` does.
+    $('#ocs_persona_bulk_count').text(String(count)).attr('title', `已选中 ${count} 个用户角色`).toggle(bulkMode);
+    $('#ocs_persona_bulk_all, #ocs_persona_bulk_favorite, #ocs_persona_bulk_tag, #ocs_persona_bulk_duplicate, #ocs_persona_bulk_delete').toggle(bulkMode);
     $('#ocs_persona_bulk_edit').toggleClass('bulk_edit_overlay_active', bulkMode);
 }
 
@@ -1080,6 +1193,220 @@ function selectAllVisible() {
         else bulkSelection.add(avatarId);
     }
     scheduleDecorate();
+}
+
+/**
+ * Toggles the favorite flag of every selected persona.
+ * Matches `CharacterContextMenu.favorite`, which flips each entry on its own
+ * rather than forcing the whole selection to one state.
+ */
+function toggleSelectedPersonaFavorites() {
+    const avatarIds = [...bulkSelection].filter(avatarId => power_user.personas?.[avatarId]);
+    if (!avatarIds.length) return toastr.info('请先选择至少一个用户角色。', '用户角色管理');
+
+    for (const avatarId of avatarIds) {
+        const record = meta(avatarId);
+        record.favorite = !record.favorite;
+        record.updatedAt = Date.now();
+    }
+    saveSettingsDebounced();
+    refreshDetailPane();
+    refreshFilterUi();
+}
+
+/**
+ * Copies every selected persona, avatar file included.
+ *
+ * A persona is keyed by its avatar file name, so a real copy needs a new file:
+ * the source image is re-uploaded through the stock avatar endpoint, which
+ * mints a fresh name and leaves the original untouched.
+ */
+async function duplicateSelectedPersonas() {
+    const avatarIds = [...bulkSelection].filter(avatarId => power_user.personas?.[avatarId]);
+    if (!avatarIds.length) return toastr.info('请先选择至少一个用户角色。', '用户角色管理');
+
+    const failed = [];
+    let created = 0;
+
+    for (const avatarId of avatarIds) {
+        try {
+            const image = await fetch(`/User%20Avatars/${encodeURIComponent(avatarId)}`);
+            if (!image.ok) throw new Error(`HTTP ${image.status}`);
+
+            const form = new FormData();
+            form.append('avatar', await image.blob(), avatarId);
+            const upload = await fetch('/api/avatars/upload', {
+                method: 'POST',
+                headers: getRequestHeaders({ omitContentType: true }),
+                body: form,
+            });
+            if (!upload.ok) throw new Error(`HTTP ${upload.status}`);
+
+            const newAvatarId = (await upload.json())?.path;
+            if (!newAvatarId) throw new Error('missing path');
+
+            const name = `${power_user.personas[avatarId]} - 副本`;
+            const descriptor = structuredClone(power_user.persona_descriptions?.[avatarId] ?? {});
+            // A copy has not been used anywhere yet. Carrying these over would
+            // make it claim chat/character locks it never earned, and point at
+            // version ids that belong to the original's avatar key.
+            delete descriptor.connections;
+            delete descriptor.extensions?.one_click_snapshot;
+
+            power_user.personas[newAvatarId] = name;
+            power_user.persona_descriptions[newAvatarId] = descriptor;
+
+            const source = meta(avatarId);
+            const copy = meta(newAvatarId);
+            copy.tags = [...source.tags];
+            copy.favorite = source.favorite;
+            copy.createdAt = Date.now();
+            copy.updatedAt = Date.now();
+            copy.lastUsedAt = Date.now();
+            copy.messageCount = 0;
+            copy.useCount = 0;
+
+            created++;
+            await eventSource.emit(event_types.PERSONA_CREATED, {
+                avatarId: newAvatarId,
+                name,
+                description: descriptor.description ?? '',
+                title: descriptor.title ?? '',
+            });
+        } catch (error) {
+            console.error('[One-click Snapshot] failed to duplicate persona', avatarId, error);
+            failed.push(power_user.personas[avatarId] ?? avatarId);
+        }
+    }
+
+    if (created) {
+        saveSettingsDebounced();
+        toastr.success(`已复制 ${created} 个用户角色。`, '用户角色管理');
+    }
+    if (failed.length) toastr.error(`这些用户角色复制失败：${failed.join('、')}`, '用户角色管理');
+
+    bulkSelection.clear();
+    bulkMode = false;
+    refreshFilterUi();
+}
+
+/**
+ * Bulk tag editor for the selected personas. Mirrors the semantics of
+ * SillyTavern's own character bulk tag popup: adding applies to everyone in
+ * the selection, and the chips shown are the tags they all share.
+ */
+async function editSelectedPersonaTags() {
+    const avatarIds = [...bulkSelection].filter(avatarId => power_user.personas?.[avatarId]);
+    if (!avatarIds.length) return toastr.info('请先选择至少一个用户角色。', '用户角色管理');
+
+    // Mirrors SillyTavern's own character bulk tag popup (`#bulk_tag_popup`):
+    // same heading, description, avatar strip, tag control and action row.
+    const root = $('<div class="ocs-persona-bulk-tags"></div>');
+    root.append($('<h3 class="marginBot5"></h3>').text(`修改 ${avatarIds.length} 个用户角色的标签`));
+    root.append('<small class="bulk_tags_desc m-b-1">为所有选中的用户角色添加或移除共有标签。</small>');
+    root.append('<div class="ocs-persona-bulk-tags-avatars avatars_inline avatars_inline_small tags tags_inline"></div><br>');
+    root.append(
+        '<div class="marginBot5">' +
+        '<div class="tag_controls">' +
+        '<input class="ocs-persona-bulk-tag-input text_pole tag_input wide100p margin0" placeholder="搜索 / 新建标签" />' +
+        '<div class="tags_view menu_button fa-solid fa-tags" title="管理标签"></div>' +
+        '</div>' +
+        '<div class="ocs-persona-bulk-tag-list m-t-1 tags"></div>' +
+        '</div>' +
+        '<div class="ocs-persona-bulk-tags-actions m-t-1">' +
+        '<div class="menu_button ocs-persona-bulk-tags-destructive ocs-persona-bulk-tags-clear" title="移除选中用户角色的全部标签"><i class="fa-solid fa-trash-can margin-right-10px"></i>全部</div>' +
+        '<div class="menu_button ocs-persona-bulk-tags-destructive ocs-persona-bulk-tags-mutual" title="只移除它们共有的标签"><i class="fa-solid fa-trash-can margin-right-10px"></i>共有</div>' +
+        '</div>',
+    );
+
+    buildPersonaAvatarList(root.find('.ocs-persona-bulk-tags-avatars'), avatarIds);
+
+    /** Tags every selected persona has. */
+    const mutualTags = () => {
+        const [first, ...rest] = avatarIds;
+        return personaTags(first).filter(tag => rest.every(avatarId => personaTagIds(avatarId).includes(tag.id)));
+    };
+
+    const repaint = () => {
+        printTagList(root.find('.ocs-persona-bulk-tag-list'), {
+            tags: mutualTags(),
+            empty: 'always',
+            tagOptions: {
+                removable: true,
+                removeAction: tag => {
+                    for (const avatarId of avatarIds) removePersonaTag(avatarId, tag.id);
+                    saveSettingsDebounced();
+                    refreshFilterUi();
+                    return true;
+                },
+            },
+        });
+    };
+
+    const input = root.find('.ocs-persona-bulk-tag-input');
+    const commit = (tagName) => {
+        const name = String(tagName ?? '').trim();
+        if (!name) return;
+        const tag = createGlobalTag(name);
+        for (const avatarId of avatarIds) addPersonaTag(avatarId, tag.id);
+        saveSettingsDebounced();
+        input.val('');
+        repaint();
+        refreshFilterUi();
+    };
+
+    // @ts-ignore jQuery UI is bundled by SillyTavern
+    input.autocomplete({
+        minLength: 0,
+        source: (request, response) => {
+            const assigned = new Set(mutualTags().map(tag => tag.id));
+            const term = String(request.term ?? '').toLowerCase();
+            response(tags
+                .filter(tag => !assigned.has(tag.id) && tag.name.toLowerCase().includes(term))
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map(tag => ({ label: tag.name, value: tag.name })));
+        },
+        select: (event, ui) => {
+            commit(ui.item.value);
+            return false;
+        },
+    }).on('focus', function () {
+        // @ts-ignore
+        $(this).autocomplete('search', String($(this).val() ?? ''));
+    }).on('keydown', function (event) {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        commit($(this).val());
+    });
+
+    root.find('.ocs-persona-bulk-tags-clear').on('click', async () => {
+        const confirmed = await Popup.show.confirm('移除全部标签', `确定移除这 ${avatarIds.length} 个用户角色的<b>全部</b>标签吗？`);
+        if (!confirmed) return;
+        for (const avatarId of avatarIds) {
+            meta(avatarId).tags = [];
+            touchPersona(avatarId);
+        }
+        saveSettingsDebounced();
+        repaint();
+        refreshFilterUi();
+    });
+
+    root.find('.ocs-persona-bulk-tags-mutual').on('click', async () => {
+        const mutual = mutualTags();
+        if (!mutual.length) return toastr.info('这些用户角色没有共有的标签。', '用户角色管理');
+        const confirmed = await Popup.show.confirm('移除共有标签', `确定移除它们共有的 ${mutual.length} 个标签吗？各自独有的标签会保留。`);
+        if (!confirmed) return;
+        for (const avatarId of avatarIds) {
+            for (const tag of mutual) removePersonaTag(avatarId, tag.id);
+        }
+        saveSettingsDebounced();
+        repaint();
+        refreshFilterUi();
+    });
+
+    repaint();
+    await callGenericPopup(root, POPUP_TYPE.TEXT, '', { wide: true, allowVerticalScrolling: true });
+    refreshDetailPane();
 }
 
 /**
@@ -1279,7 +1606,11 @@ export function installPersonaManager(getSettings) {
         installDetailPane();
         observeList();
         refreshDetailPane();
-        scheduleDecorate();
+        // On first load the list may already have been rendered before
+        // `user_avatar` was known, so it can still contain the persona that is
+        // about to be pinned. Re-filter rather than only redecorating.
+        if (state().pinCurrent !== false) refreshList();
+        else scheduleDecorate();
     };
 
     // The persona panel exists in the initial document, but the drawer content
@@ -1310,7 +1641,17 @@ export function installPersonaManager(getSettings) {
     eventSource.on(event_types.PERSONA_CHANGED, () => {
         touchPersona(user_avatar, { used: true });
         refreshDetailPane();
-        scheduleDecorate();
+        // Which personas the list must leave out is decided while filtering, so
+        // a decorate pass alone would leave a pinned persona sitting in the
+        // list as well. Only the unbound fallback tracks the selection, but the
+        // chat lock can move with it too.
+        if (state().pinCurrent !== false) refreshList();
+        else scheduleDecorate();
+    });
+    // The binding follows the character, so opening another chat changes what
+    // belongs at the top.
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        if (state().pinCurrent !== false) setTimeout(refreshList, 0);
     });
     eventSource.on(event_types.USER_MESSAGE_RENDERED, messageId => countNewMessage(chat?.[messageId]));
     eventSource.on(event_types.PERSONA_DELETED, ({ avatarId }) => {

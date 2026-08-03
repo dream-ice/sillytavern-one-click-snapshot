@@ -274,16 +274,23 @@
 .ocs-native-version-hint { display: inline-block; margin: 0 5px; color: var(--SmartThemeQuoteColor, #9cc); font-size: .78em; line-height: 1.2; overflow-wrap: anywhere; vertical-align: middle; white-space: normal; opacity: .9; }
 
 /* Persona management: tag filters, folders, favorites and bulk selection. */
-#persona_sort_order { min-width: 7.2em; max-width: 10em; }
+/* Wide enough for the Chinese sort labels, but allowed to shrink so the extra
+   toolbar buttons never force the whole left column wider. */
+#persona_sort_order { min-width: 0; max-width: 10em; flex: 0 1 7.2em; }
+
 #ocs_persona_tag_controls { display: flex; flex-wrap: wrap; align-items: center; margin-bottom: 5px; }
 #ocs_persona_tag_filter { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; width: 100%; }
 #ocs_persona_tag_filter .tag { cursor: pointer; }
+/* The label and separator are flex items of `#user_avatar_block`, so they have
+   to claim a full row of their own. The card itself is left alone — whatever
+   width the stock list or grid rules give it stays correct. */
+#user_avatar_block .ocs-persona-current-label { flex: 0 0 100%; margin: 0 0 3px; color: var(--SmartThemeQuoteColor); font-size: .78em; letter-spacing: .08em; opacity: .9; }
+#user_avatar_block .ocs-persona-current-sep { flex: 0 0 100%; height: 0; margin: 7px 0; border-top: 1px solid var(--SmartThemeBorderColor); }
 #ocs_persona_folders:empty { display: none; }
 #ocs_persona_folders { display: flex; flex-direction: column; gap: 5px; margin-bottom: 5px; }
 #ocs_persona_folders .bogus_folder_select { cursor: pointer; }
 
 #ocs_persona_tags { margin-bottom: 5px; }
-#ocs_persona_tags .tag_controls { display: flex; align-items: center; gap: 5px; }
 #ocs_persona_tag_list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
 #ocs_persona_tag_list:empty { margin-top: 0; }
 #ocs_persona_favorite { opacity: .45; }
@@ -322,6 +329,21 @@
 #user_avatar_block.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
 #ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
 #ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select:hover { background: none; }
+
+.ocs-persona-bulk-tags { width: min(720px, 100%); text-align: left; }
+.ocs-persona-bulk-tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.ocs-persona-bulk-tag-list:empty::before { content: '这些用户角色暂时没有共有的标签。'; opacity: .58; font-style: italic; }
+/* Same geometry as SillyTavern's `#dialogue_popup_controls`. */
+.ocs-persona-bulk-tags-actions { display: flex; align-self: center; justify-content: center; gap: 20px; }
+.ocs-persona-bulk-tags-destructive { background-color: var(--crimson70a); }
+/* `.menu_button` is `width: min-content`, which for CJK labels resolves to a
+   single character and stacks the text vertically — every character is a valid
+   break point. Size to the text and forbid the wrap. */
+.ocs-persona-bulk-tags-actions .menu_button { width: auto; white-space: nowrap; }
+
+/* `.title_restorable` is `justify-content: space-between`, which flings the
+   maximize button to the far right of the label. Keep it beside the text. */
+.ocs-regex-label.title_restorable { justify-content: flex-start; gap: 8px; }
 
 @media (max-width: 700px) {
     /* Same approach as Timeline Memory: only neutralize the wide popup's

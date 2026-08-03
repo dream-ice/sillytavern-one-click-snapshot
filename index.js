@@ -2729,6 +2729,100 @@ function installGreetingCatalogIntegration() {
         .on('click.oneClickSnapshotGreetingCatalog', '.open_alternate_greetings, .add_alternate_greeting, .move_up_alternate_greeting, .move_down_alternate_greeting', scheduleNativeGreetingDecoration);
 }
 
+/* ------------------------------------------------ native editor maximizers -- */
+
+/**
+ * Fields in the regex editor that deserve a full-screen editor, keyed by the
+ * id to assign. The template's labels already point `for=` at exactly these
+ * ids but the controls themselves never got one, so setting them also repairs
+ * the label-to-field association.
+ */
+const REGEX_MAXIMIZE_FIELDS = [
+    // "Find Regex" is deliberately absent: it is a single-line <input>, and a
+    // full-screen textarea invites a stray newline that would break the pattern.
+    { selector: '.regex_replace_string', id: 'regex_replace_string' },
+    { selector: '.regex_trim_strings', id: 'regex_trim_strings' },
+];
+
+/**
+ * Adds SillyTavern's own "maximize" button to the regex editor's long fields.
+ *
+ * Reuses the native `.editor_maximize` control rather than reimplementing it:
+ * its handler is delegated on document and resolves the target through
+ * `data-for`, so an injected button behaves exactly like the built-in ones.
+ */
+function decorateRegexEditorFields() {
+    const dialog = document.querySelector('dialog.popup[open]');
+    if (!dialog) return;
+
+    for (const { selector, id } of REGEX_MAXIMIZE_FIELDS) {
+        const field = dialog.querySelector(selector);
+        if (!field) continue;
+        if (!field.id) field.id = id;
+
+        const label = field.closest('.flex1')?.querySelector('label.title_restorable');
+        if (!label || label.querySelector('.editor_maximize')) continue;
+        label.classList.add('ocs-regex-label');
+
+        const button = document.createElement('i');
+        button.className = 'editor_maximize fa-solid fa-maximize right_menu_button';
+        button.setAttribute('data-for', field.id);
+        button.title = '展开编辑器';
+        label.append(button);
+    }
+}
+
+/** Watches for the regex editor popup so its fields get maximize buttons. */
+function installNativeEditorMaximizers() {
+    let queued = false;
+    new MutationObserver(() => {
+        if (queued) return;
+        queued = true;
+        queueMicrotask(() => {
+            queued = false;
+            decorateRegexEditorFields();
+        });
+    }).observe(document.body, { childList: true, subtree: true });
+}
+
+/* -------------------------------------------- character bulk action buttons -- */
+
+/**
+ * The bulk actions SillyTavern only exposes through a right-click on a
+ * selected character. Delete is omitted: `#bulkDeleteButton` already shows it.
+ */
+const CHARACTER_BULK_ACTIONS = [
+    { id: 'character_context_menu_favorite', icon: 'fa-star', title: '收藏 / 取消收藏选中的角色' },
+    { id: 'character_context_menu_tag', icon: 'fa-tags', title: '给选中的角色批量打标签' },
+    { id: 'character_context_menu_duplicate', icon: 'fa-clone', title: '复制选中的角色' },
+    { id: 'character_context_menu_persona', icon: 'fa-user', title: '把选中的角色转为用户角色' },
+];
+
+/**
+ * Surfaces the character context menu as visible buttons, left of the trash.
+ *
+ * Every button just clicks the native menu entry, so there is no second
+ * implementation to keep in sync. They carry `bulkEditOptionElement`, the
+ * class SillyTavern already shows and hides with bulk edit mode, so their
+ * visibility needs no watching of our own.
+ */
+function installCharacterBulkActionButtons() {
+    const trash = $('#bulkDeleteButton');
+    if (!trash.length || $('#ocs_bulk_character_context_menu_tag').length) return;
+
+    for (const action of CHARACTER_BULK_ACTIONS) {
+        const button = $('<i class="fa-solid menu_button bulkEditOptionElement" style="display: none;"></i>')
+            .attr({ id: `ocs_bulk_${action.id}`, title: action.title })
+            .addClass(action.icon)
+            .on('click', () => {
+                const entry = /** @type {HTMLElement?} */ (document.getElementById(action.id));
+                if (!entry) return toastr.warning('找不到酒馆对应的批量操作入口。', '一键快照');
+                entry.click();
+            });
+        trash.before(button);
+    }
+}
+
 function greetingBindingRecords(character = currentCharacter()) {
     const avatar = character?.avatar;
     if (!avatar) return {};
@@ -4380,6 +4474,9 @@ $(async () => {
     installVersionAutoSync();
     installPersonaManager(settings);
     installPersonaTitleLock();
+    installNativeEditorMaximizers();
+    installCharacterBulkActionButtons();
+    setTimeout(installCharacterBulkActionButtons, 1000);
     eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
     eventSource.on(event_types.PERSONA_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
     setTimeout(refreshNameMirrorLocks, 0);
