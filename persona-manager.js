@@ -765,7 +765,7 @@ function renderFilterRow() {
         });
 
     const pinned = state().pinCurrent !== false;
-    appendAction({ id: 'ocs-filter-pin', name: pinned ? '当前角色绑定的用户已置顶，点击取消' : '把当前角色绑定的用户置顶', color: 'rgba(150, 100, 100, 0.5)', icon: 'fa-solid fa-thumbtack' },
+    appendAction({ id: 'ocs-filter-pin', name: pinned ? '绑定 / 默认的用户已置顶，点击取消' : '把绑定 / 默认的用户置顶', color: 'rgba(150, 100, 100, 0.5)', icon: 'fa-solid fa-thumbtack' },
         pinned ? FILTER_STATE.SELECTED : FILTER_STATE.UNDEFINED, () => {
             state().pinCurrent = !pinned;
             saveSettingsDebounced();
@@ -828,28 +828,34 @@ function applyPersonaStateClasses(card, avatarId) {
 }
 
 /**
- * The personas to keep at the top of the list.
+ * The personas to keep at the top of the list, most specific binding first.
  *
  * Deliberately the ones *bound to what you are doing now*, not the one merely
  * selected: the point is to still reach the persona a character is linked to
- * after switching away to crib from an older one. Falls back to the persona in
- * use so the row stays useful for people who never link personas at all.
+ * after switching away to crib from an older one. Each step down keeps the row
+ * useful for people who use fewer of SillyTavern's binding features.
  *
- * @returns {{ids: string[], bound: boolean}}
+ * @returns {{ids: string[], label: string}}
  */
 function pinnedPersonaIds() {
-    if (state().pinCurrent === false) return { ids: [], bound: false };
+    if (state().pinCurrent === false) return { ids: [], label: '' };
 
-    const ids = new Set();
-    // The chat lock is the most specific binding, so it leads.
-    if (chat_metadata.persona && power_user.personas?.[chat_metadata.persona]) ids.add(chat_metadata.persona);
+    const exists = avatarId => Boolean(avatarId) && Boolean(power_user.personas?.[avatarId]);
+
+    // 1. Bound to this chat or this character — the most specific binding.
+    const bound = new Set();
+    if (exists(chat_metadata.persona)) bound.add(chat_metadata.persona);
     for (const avatarId of getConnectedPersonas() ?? []) {
-        if (power_user.personas?.[avatarId]) ids.add(avatarId);
+        if (exists(avatarId)) bound.add(avatarId);
     }
-    if (ids.size) return { ids: [...ids], bound: true };
+    if (bound.size) return { ids: [...bound], label: '当前角色绑定' };
 
-    if (user_avatar && power_user.personas?.[user_avatar]) return { ids: [user_avatar], bound: false };
-    return { ids: [], bound: false };
+    // 2. The default persona, which is what a new chat would pick anyway.
+    if (exists(power_user.default_persona)) return { ids: [power_user.default_persona], label: '默认用户' };
+
+    // 3. Nothing configured at all: whatever is in use.
+    if (exists(user_avatar)) return { ids: [user_avatar], label: '当前使用' };
+    return { ids: [], label: '' };
 }
 
 /**
@@ -868,7 +874,7 @@ function renderCurrentPersonaRow() {
     const list = $('#user_avatar_block');
     list.find('.ocs-persona-current-label, .ocs-persona-current-card, .ocs-persona-current-sep').remove();
 
-    const { ids, bound } = pinnedPersonaIds();
+    const { ids, label: labelText } = pinnedPersonaIds();
     if (!ids.length) return;
 
     const cards = ids.map(avatarId => {
@@ -883,7 +889,7 @@ function renderCurrentPersonaRow() {
         return card;
     });
 
-    const label = $('<div class="ocs-persona-current-label"></div>').text(bound ? '当前角色绑定' : '当前使用');
+    const label = $('<div class="ocs-persona-current-label"></div>').text(labelText);
     list.prepend(label, ...cards, $('<div class="ocs-persona-current-sep"></div>'));
 }
 
