@@ -504,6 +504,10 @@
    control shape carries the hierarchy, so the block stays quiet inside whatever
    theme the user is running. Every colour derives from the theme's own two. */
 .ocs-settings { --ocs-line: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 14%, transparent); text-align: left; }
+/* Full drawer width, so the switches stay in one right-aligned column. The
+   inset matches the header's own `padding: 2px 5px` plus its 1px border, which
+   puts the column on the same vertical line as the chevron in the title bar. */
+#ocs_feature_settings .ocs-settings { max-width: none; padding-right: 6px; }
 
 .ocs-feat { position: relative; padding: 11px 0 11px 12px; border-top: 1px solid var(--ocs-line); }
 .ocs-feat:first-child { border-top: 0; }
@@ -512,7 +516,7 @@
 .ocs-feat::before { position: absolute; top: 50%; left: 0; width: 2px; height: 0; background: var(--SmartThemeQuoteColor); border-radius: 2px; content: ''; transform: translateY(-50%); transition: height var(--animation-duration, .18s) ease; }
 .ocs-feat.is-on::before { height: calc(100% - 22px); }
 
-.ocs-feat-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.ocs-feat-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .ocs-feat-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .ocs-feat-name { margin: 0 !important; cursor: pointer; font-size: 1em; font-weight: 600; line-height: 1.25; opacity: .55; transition: opacity var(--animation-duration, .18s) ease; }
 .ocs-feat.is-on .ocs-feat-name { opacity: 1; }
@@ -528,10 +532,10 @@
 /* Track and thumb, sized off the font so it scales with the user's theme. */
 .ocs-switch { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; }
 .ocs-switch input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.ocs-switch-track { display: block; width: 2.4em; height: 1.3em; padding: 2px; border: 1px solid var(--ocs-line); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 8%, transparent); transition: background var(--animation-duration, .18s) ease, border-color var(--animation-duration, .18s) ease; }
-.ocs-switch-thumb { display: block; width: calc(1.3em - 4px); height: calc(1.3em - 4px); border-radius: 50%; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 45%, transparent); transition: transform var(--animation-duration, .18s) ease, background var(--animation-duration, .18s) ease; }
+.ocs-switch-track { display: block; width: 2em; height: 1.1em; padding: 2px; border: 1px solid var(--ocs-line); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 8%, transparent); transition: background var(--animation-duration, .18s) ease, border-color var(--animation-duration, .18s) ease; }
+.ocs-switch-thumb { display: block; width: calc(1.1em - 4px); height: calc(1.1em - 4px); border-radius: 50%; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 45%, transparent); transition: transform var(--animation-duration, .18s) ease, background var(--animation-duration, .18s) ease; }
 .ocs-switch input:checked ~ .ocs-switch-track { border-color: var(--SmartThemeQuoteColor); background: color-mix(in srgb, var(--SmartThemeQuoteColor) 30%, transparent); }
-.ocs-switch input:checked ~ .ocs-switch-track .ocs-switch-thumb { background: var(--SmartThemeQuoteColor); transform: translateX(1.1em); }
+.ocs-switch input:checked ~ .ocs-switch-track .ocs-switch-thumb { background: var(--SmartThemeQuoteColor); transform: translateX(0.9em); }
 .ocs-switch input:focus-visible ~ .ocs-switch-track { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 2px; }
 
 /* Sub-settings exist only while the parent is on; collapsed they take no room
