@@ -20,17 +20,19 @@ import {
     this_chid,
 } from '../../../../script.js';
 import { extension_settings, saveMetadataDebounced } from '../../../extensions.js';
+import { accountStorage } from '../../../util/AccountStorage.js';
 import { getWorldInfoSettings, loadWorldInfo, onWorldInfoChange, saveWorldInfo, world_names } from '../../../world-info.js';
-import { getCharaFilename, getSortableDelay } from '../../../utils.js';
+import { PAGINATION_TEMPLATE, getCharaFilename, getSortableDelay, localizePagination, paginationDropdownChangeHandler, renderPaginationDropdown } from '../../../utils.js';
 import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
 import { getChatCompletionModel, selected_proxy, settingsToUpdate } from '../../../openai.js';
 import { SECRET_KEYS, rotateSecret, secret_state } from '../../../secrets.js';
 import { getConnectedPersonas, getUserAvatars, setPersonaDescription, setPersonaLockState, setUserAvatar, user_avatar } from '../../../personas.js';
-import { POPUP_RESULT, POPUP_TYPE, Popup } from '../../../popup.js';
+import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from '../../../popup.js';
 import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallowScopedScripts, getCurrentPresetAPI, getCurrentPresetName, getScriptsByType, isPresetScriptsAllowed, isScopedScriptsAllowed, saveScriptsByType, SCRIPT_TYPES } from '../../regex/engine.js';
 import { DiffMatchPatch } from '../../../../lib.js';
-import { installPersonaManager } from './persona-manager.js';
+import { installPersonaManager, setPersonaManagerEnabled } from './persona-manager.js';
+import { feature, initFeatures, installFeatureSettings, onFeatureChange } from './settings-panel.js';
 
 const EXTENSION_KEY = 'one_click_snapshot';
 const METADATA_KEY = 'one_click_snapshot';
@@ -165,6 +167,37 @@ function currentPersonaVersion() {
     return personaVersions().find(version => version.id === active) ?? null;
 }
 
+/**
+ * Wraps a snapshot-scoped event handler so it does nothing while the feature
+ * is off, instead of having to unbind it.
+ * @param {Function} handler Event handler
+ * @returns {Function}
+ */
+function whenSnapshot(handler) {
+    return (...args) => (feature('snapshot') ? handler(...args) : undefined);
+}
+
+/**
+ * Reconciles everything this extension injects with the current switches.
+ * Called at start-up and again whenever a switch moves, which is what makes the
+ * settings take effect without a reload.
+ */
+function applyFeatureState() {
+    renderQrShortcut();
+
+    const versionOn = feature('version');
+    $('#one_click_snapshot_character_version_button, #one_click_snapshot_persona_version_button').toggle(versionOn);
+    // The "More" entries are <option> elements. Safari has never honoured
+    // display:none on those, so drop and re-add them instead of hiding —
+    // installVersionMenu only appends what is missing.
+    if (versionOn) installVersionMenu();
+    else $('#one_click_snapshot_character_versions, #one_click_snapshot_persona_versions').remove();
+
+    $('[id^="ocs_bulk_character_context_menu_"]').toggleClass('ocs-feature-off', !feature('native.characterBulkButtons'));
+    setPersonaManagerEnabled(feature('persona'));
+    refreshVersionIndicators();
+}
+
 /* ------------------------------------------------- version name mirroring -- */
 
 /**
@@ -273,6 +306,7 @@ function installPersonaTitleLock() {
 
 function refreshVersionIndicators() {
     $('#one_click_snapshot_character_version_hint, #one_click_snapshot_persona_version_hint').remove();
+    if (!feature('version')) return;
     const characterVersion = currentCharacterVersion();
     if (characterVersion?.name) {
         const hint = $('<span id="one_click_snapshot_character_version_hint" class="ocs-native-version-hint"></span>').text(characterVersion.name);
@@ -1580,19 +1614,63 @@ async function applyPreset(state) {
 }
 
 function validateSnapshotVersionScopes(scopes) {
+    // "No version yet" and "nothing selected to have a version" need different
+    // wording: telling someone to go create a version is useless advice when
+    // they have not opened a character at all.
     const missing = [];
+    const unselected = [];
     if (scopes.character && !currentCharacterVersion()) {
-        missing.push(characterVersions().length ? '角色尚未应用已保存版本' : '角色尚未创建版本');
+        if (!currentCharacter()) unselected.push('角色');
+        else missing.push(characterVersions().length ? '角色尚未应用已保存版本' : '角色尚未创建版本');
     }
     if (scopes.persona && !currentPersonaVersion()) {
-        missing.push(personaVersions().length ? '用户尚未应用已保存版本' : '用户尚未创建版本');
+        if (!user_avatar) unselected.push('用户');
+        else missing.push(personaVersions().length ? '用户尚未应用已保存版本' : '用户尚未创建版本');
+    }
+    if (unselected.length) {
+        toastr.warning(`还没有选择${unselected.join('和')}，无法记录${unselected.join('和')}版本。`, '一键快照');
+        return false;
     }
     if (!missing.length) return true;
     toastr.warning(`${missing.join('；')}，请先在“更多”中完成版本管理后再保存快照。`, '一键快照');
     return false;
 }
 
+/**
+ * Creates a version from the current description when a snapshot is about to
+ * record a version reference and there is none yet.
+ *
+ * Without this the character / persona scope quietly stores `versionId: null`,
+ * and applying that snapshot does nothing at all for those scopes — the user
+ * has to know to go build a version by hand first.
+ *
+ * @param {'character'|'persona'} type Version type
+ * @returns {boolean} Whether a version was created
+ */
+function ensureVersionForSnapshot(type) {
+    if (!feature('version.autoInitial')) return false;
+    const existing = type === 'character' ? currentCharacterVersion() : currentPersonaVersion();
+    if (existing) return false;
+
+    const state = captureVersionFormState(type);
+    if (!state?.avatar) return false;
+
+    const context = versionContext(type);
+    const version = { id: makeId(), createdAt: Date.now(), updatedAt: Date.now(), name: '初始版本', data: state, group: '' };
+    context.list.push(version);
+    if (type === 'character') settings().activeCharacterVersions[state.avatar] = version.id;
+    else settings().activePersonaVersions[state.avatar] = version.id;
+    refreshVersionIndicators();
+    toastr.info(`已为${type === 'character' ? '角色' : '用户'}新建「初始版本」。`, '一键快照');
+    return true;
+}
+
 async function buildSnapshot(name, scopes) {
+    // Before validating, not after: the check below refuses to build a snapshot
+    // when a version scope has no version, so creating one has to happen first
+    // or the setting could never take effect.
+    if (scopes.character) ensureVersionForSnapshot('character');
+    if (scopes.persona) ensureVersionForSnapshot('persona');
     if (!validateSnapshotVersionScopes(scopes)) return null;
     const character = scopes.character ? currentCharacter() : null;
     const persona = scopes.persona && user_avatar ? {
@@ -1627,13 +1705,340 @@ async function createSnapshot(name, scopes, group = '') {
     return snapshot;
 }
 
-async function updateSnapshot(snapshot, scopes = snapshot.scopes) {
-    const replacement = await buildSnapshot(snapshot.name, scopes);
+/** The scopes a snapshot can hold, in the order they are shown. */
+const SNAPSHOT_SCOPE_LABELS = {
+    character: '角色版本',
+    persona: '用户版本',
+    theme: '界面美化',
+    worldInfo: '世界书与条目',
+    preset: '预设与条目',
+    api: '聊天补全 API',
+    regex: '正则规则',
+};
+
+/** Scopes that store a version reference rather than content. */
+const VERSION_SCOPES = new Set(['character', 'persona']);
+
+/**
+ * Refreshes only the named scopes of a snapshot from the current state.
+ *
+ * The whole point is that everything else is left alone: rebuilding the entire
+ * snapshot — which is what a plain update does — would drag the current preset,
+ * API and theme into a snapshot the user only wanted to add a lorebook to.
+ *
+ * Each scope is recaptured with that snapshot's *own* source configuration, so
+ * a snapshot that deliberately captures only the global lorebooks keeps doing
+ * exactly that.
+ *
+ * @param {object} snapshot Snapshot to modify in place
+ * @param {string[]} scopeKeys Scopes to refresh
+ * @param {object} [options]
+ * @param {boolean} [options.addMissing=false] Also refresh scopes the snapshot does not currently hold
+ * @returns {Promise<boolean>} Whether anything changed
+ */
+async function refreshSnapshotScopes(snapshot, scopeKeys, { addMissing = false, worldSources = null, regexSources = null } = {}) {
+    // Without "add missing", a picked scope only applies to snapshots that
+    // already record it, so a batch never cross-contaminates.
+    const applicable = scopeKeys.filter(key => addMissing || snapshot.scopes?.[key] === true);
+    if (!applicable.length) return false;
+
+    const captureScopes = deepClone(snapshot.scopes ?? {});
+    for (const key of applicable) captureScopes[key] = true;
+    // Explicit sub-sources win; otherwise the snapshot keeps capturing from
+    // exactly the places it captured from before.
+    if (worldSources && Object.keys(worldSources).length) captureScopes.worldSources = worldSources;
+    if (regexSources && Object.keys(regexSources).length) captureScopes.regexSources = regexSources;
+    // Capture only what we are about to write, so an unrelated scope cannot
+    // fail validation and abort the whole refresh.
+    for (const key of Object.keys(SNAPSHOT_SCOPE_LABELS)) {
+        if (!applicable.includes(key)) captureScopes[key] = false;
+    }
+
+    const fresh = await buildSnapshot(snapshot.name, normalizedSnapshotScopes(captureScopes));
+    if (!fresh) return false;
+
+    snapshot.payload ??= {};
+    snapshot.scopes ??= {};
+    for (const key of applicable) {
+        snapshot.payload[key] = fresh.payload[key];
+        snapshot.scopes[key] = true;
+    }
+    if (applicable.includes('worldInfo') && worldSources && Object.keys(worldSources).length) snapshot.scopes.worldSources = worldSources;
+    if (applicable.includes('regex') && regexSources && Object.keys(regexSources).length) snapshot.scopes.regexSources = regexSources;
+    snapshot.updatedAt = Date.now();
+    return true;
+}
+
+/** Sub-sources the world info and regex scopes can be narrowed to. */
+const WORLD_SOURCE_LABELS = { global: '全局世界书', characterMain: '角色主世界书', characterExtra: '角色附加世界书', user: '用户绑定世界书', chat: '聊天世界书' };
+const REGEX_SOURCE_LABELS = { global: '全局正则', scoped: '角色局部正则', preset: '当前预设正则' };
+
+/**
+ * Asks which scopes to refresh, and for the two scopes that have sub-sources,
+ * which of those to include.
+ *
+ * @param {object} options
+ * @param {string} options.title Popup title
+ * @param {string} options.hint Explanation shown above the list
+ * @param {string[]} options.candidates Scopes to offer, in display order
+ * @param {object} options.sources Source maps to pre-tick from (`worldSources`, `regexSources`)
+ * @param {string[]} [options.preselected] Scopes to pre-tick
+ * @param {Map<string, number>} [options.counts] How many targets already hold each scope
+ * @param {number} [options.total] Number of targets, for the counts
+ * @param {boolean} [options.confirmVersions=false] Whether to confirm re-pointing version references
+ * @param {string[]} [options.extras] Scopes hidden behind the "show everything" toggle
+ * @returns {Promise<{scopes: string[], worldSources: object, regexSources: object}|null>} Choice, or null when cancelled
+ */
+async function chooseSnapshotScopes({ title, hint, candidates, sources, preselected = [], counts = null, total = 0, confirmVersions = false, extras = [] }) {
+    const root = $('<div class="ocs-scope-picker"></div>');
+    const head = $('<div class="ocs-scope-picker-head"></div>').append($('<h3></h3>').text(title));
+    root.append(head, $('<small></small>').text(hint));
+
+    // Expanding to every scope is a choice about this one operation, not a
+    // lasting preference — whether a missing scope may be added is the setting.
+    if (extras.length) {
+        const toggle = $('<label class="checkbox_label ocs-scope-extra-toggle"></label>');
+        const input = $('<input type="checkbox">');
+        toggle.append(input, $('<span></span>').text('显示全部范围'));
+        input.on('change', function () { root.find('.ocs-scope-picker-grid').toggleClass('ocs-show-extras', this.checked); });
+        head.append(toggle);
+    }
+
+    const grid = $('<div class="ocs-scope-picker-grid"></div>');
+    for (const key of [...candidates, ...extras]) {
+        const cell = $('<div class="ocs-scope-picker-cell"></div>').toggleClass('ocs-scope-extra', extras.includes(key));
+        const row = $('<label class="checkbox_label"></label>');
+        const input = $('<input type="checkbox">').attr('value', key).prop('checked', preselected.includes(key));
+        row.append(input, $('<span></span>').text(SNAPSHOT_SCOPE_LABELS[key]));
+
+        // In a batch, say up front how many of the chosen snapshots already
+        // hold this scope — that is what decides whether "补上未包含的范围"
+        // matters for it.
+        if (counts) {
+            const held = counts.get(key) ?? 0;
+            row.append($('<small class="ocs-scope-count"></small>').text(`${held}/${total}`).toggleClass('is-partial', held < total));
+        }
+        cell.append(row);
+
+        const labels = key === 'worldInfo' ? WORLD_SOURCE_LABELS : key === 'regex' ? REGEX_SOURCE_LABELS : null;
+        if (labels) {
+            const saved = key === 'worldInfo' ? sources?.worldSources : sources?.regexSources;
+            const box = $('<div class="ocs-world-scope"></div>').attr('data-ocs-sources', key);
+            const list = $('<div class="ocs-world-sources"></div>');
+            // Only the sources these snapshots actually record. Listing the
+            // rest would invite ticking one that this update has no business
+            // adding — changing what is recorded is the card's job.
+            const recorded = Object.keys(labels).filter(source => saved?.[source] === true);
+            const shown = recorded.length ? recorded : Object.keys(labels);
+            for (const source of Object.keys(labels)) {
+                const isRecorded = shown.includes(source);
+                // Sources nobody records are only offered where a scope may be
+                // added at all, and they ride the same toggle as the scopes.
+                if (!isRecorded && !extras.length) continue;
+                list.append($('<label class="checkbox_label ocs-scope"></label>')
+                    .toggleClass('ocs-scope-extra', !isRecorded)
+                    .append($('<input type="checkbox">').attr('value', source).prop('checked', isRecorded), $('<span></span>').text(labels[source])));
+            }
+            box.append(list).toggleClass('is-enabled', input.prop('checked'));
+            input.on('change', function () { box.toggleClass('is-enabled', this.checked); });
+            cell.append(box);
+        }
+        grid.append(cell);
+    }
+    root.append(grid);
+
+    const result = await callGenericPopup(root, POPUP_TYPE.CONFIRM, '', { okButton: '更新', cancelButton: '取消' });
+    if (result !== POPUP_RESULT.AFFIRMATIVE) return null;
+
+    const scopes = root.find('.ocs-scope-picker-cell:not(.ocs-scope-extra), .ocs-show-extras .ocs-scope-extra')
+        .find('> label > input:checked').map((_, input) => String($(input).val())).get();
+    if (!scopes.length) {
+        toastr.info('没有选择任何范围。', '一键快照');
+        return null;
+    }
+    // Only worth asking for a batch: a single snapshot pointed at the version
+    // in use is the expected result. The reference is all that moves — the
+    // versions themselves stay in the version manager either way.
+    if (confirmVersions && scopes.some(key => VERSION_SCOPES.has(key))) {
+        const confirmed = await Popup.show.confirm(
+            '确认刷新版本引用',
+            '选中的快照里，凡是包含角色 / 用户版本范围的，都会被重新指向<b>当前正在使用的版本</b>。',
+        );
+        if (!confirmed) return null;
+    }
+
+    const readSources = scopeKey => Object.fromEntries(root
+        .find(`[data-ocs-sources="${scopeKey}"] .ocs-scope:not(.ocs-scope-extra), .ocs-show-extras [data-ocs-sources="${scopeKey}"] .ocs-scope.ocs-scope-extra`)
+        .find('input:checked').map((_, input) => [[String($(input).val()), true]]).get());
+    return { scopes, worldSources: readSources('worldInfo'), regexSources: readSources('regex') };
+}
+
+/** The scopes a scope map holds, in display order. */
+function heldScopes(scopes) {
+    return Object.keys(SNAPSHOT_SCOPE_LABELS).filter(key => scopes?.[key] === true);
+}
+
+async function updateSnapshot(snapshot) {
+    if (feature('snapshot.askScopeOnUpdate')) {
+        // Version scopes are pre-ticked here: for a single snapshot, pointing
+        // at the version in use is the expected result. Only a batch leaves
+        // them off, where one choice would be forced onto many snapshots.
+        const wanted = heldScopes(snapshot.scopes);
+        if (!wanted.length) return false;
+        const chosen = await chooseSnapshotScopes({
+            title: `更新快照：${snapshot.name}`,
+            hint: '勾选的范围会用当前状态覆盖，没勾的保留快照里已有的内容、不会被删除。',
+            candidates: wanted,
+            preselected: wanted,
+            sources: snapshot.scopes,
+        });
+        if (!chosen) return false;
+        const applied = await refreshSnapshotScopes(snapshot, chosen.scopes, {
+            worldSources: chosen.worldSources,
+            regexSources: chosen.regexSources,
+        });
+        if (!applied) return false;
+        saveSettingsDebounced();
+        toastr.success(`已更新快照：${snapshot.name}`, '一键快照');
+        return true;
+    }
+
+    const replacement = await buildSnapshot(snapshot.name, snapshot.scopes);
     if (!replacement) return false;
     Object.assign(snapshot, replacement, { id: snapshot.id, name: snapshot.name, group: snapshot.group ?? '', createdAt: snapshot.createdAt, updatedAt: Date.now() });
     saveSettingsDebounced();
     toastr.success(`已更新快照：${snapshot.name}`, '一键快照');
     return true;
+}
+
+/**
+ * Refreshes chosen scopes across many snapshots at once.
+ * Answers the case of "I added one more lorebook and now every older snapshot
+ * is missing it", which previously meant applying and re-saving each snapshot.
+ */
+/**
+ * Stops a batch of snapshots from recording the chosen scopes.
+ *
+ * The counterpart to adding one on a card: refreshing can only ever write, so
+ * without this there is no way to drop a scope from many snapshots at once.
+ */
+async function batchRemoveScopes(ids = []) {
+    const targets = ids.map(id => getSnapshot(id)).filter(Boolean);
+    if (!targets.length) return toastr.info('请先选择快照。', '一键快照');
+
+    const counts = new Map();
+    for (const snapshot of targets) {
+        for (const key of heldScopes(snapshot.scopes)) counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const candidates = [...counts.keys()];
+    if (!candidates.length) return toastr.info('选中的快照没有可移除的范围。', '一键快照');
+
+    const root = $('<div class="ocs-scope-picker"></div>');
+    root.append($('<div class="ocs-scope-picker-head"></div>').append($('<h3></h3>').text(`移除 ${targets.length} 个快照的范围`)));
+    root.append($('<small></small>').text('勾选的范围会从这些快照里移除，已经记下的内容会丢失。右侧数字是包含该范围的快照数。'));
+    const grid = $('<div class="ocs-scope-picker-grid"></div>');
+    for (const key of candidates) {
+        const cell = $('<div class="ocs-scope-picker-cell"></div>');
+        const row = $('<label class="checkbox_label"></label>');
+        row.append($('<input type="checkbox">').attr('value', key), $('<span></span>').text(SNAPSHOT_SCOPE_LABELS[key]));
+        const held = counts.get(key) ?? 0;
+        row.append($('<small class="ocs-scope-count"></small>').text(`${held}/${targets.length}`).toggleClass('is-partial', held < targets.length));
+        grid.append(cell.append(row));
+    }
+    root.append(grid);
+
+    if (await callGenericPopup(root, POPUP_TYPE.CONFIRM, '', { okButton: '移除', cancelButton: '取消' }) !== POPUP_RESULT.AFFIRMATIVE) return;
+    const keys = root.find('input:checked').map((_, input) => String($(input).val())).get();
+    if (!keys.length) return toastr.info('没有选择任何范围。', '一键快照');
+
+    const labels = keys.map(key => SNAPSHOT_SCOPE_LABELS[key]).join('、');
+    if (!await Popup.show.confirm('移除记录范围', `这 ${targets.length} 个快照将不再记录${labels}，已经记下的内容会丢失。`)) return;
+
+    let changed = 0;
+    for (const snapshot of targets) {
+        let touched = false;
+        for (const key of keys) {
+            if (snapshot.scopes?.[key] !== true) continue;
+            snapshot.payload[key] = null;
+            snapshot.scopes[key] = false;
+            touched = true;
+        }
+        if (!touched) continue;
+        snapshot.updatedAt = Date.now();
+        changed++;
+    }
+    if (changed) saveSettingsDebounced();
+    toastr.success(`已从 ${changed} 个快照移除${labels}。`, '一键快照');
+}
+
+async function batchUpdateSnapshots(ids = []) {
+    const targets = ids.map(id => getSnapshot(id)).filter(Boolean);
+    if (!targets.length) return toastr.info('请先选择快照。', '一键快照');
+
+    // Each snapshot refreshes only the scopes it records, so a batch never
+    // pushes one snapshot's scopes onto another. Only "允许给快照补上新范围"
+    // changes that.
+    let chosen = null;
+    if (feature('snapshot.askScopeOnBatch')) {
+        // Candidates are the union of those targets, which is how a scope just
+        // added on one card shows up without any extra switch.
+        const counts = new Map();
+        for (const snapshot of targets) {
+            for (const key of heldScopes(snapshot.scopes)) counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+        // The list is always the union; everything else hides behind the
+        // "show everything" toggle, and only when adding a scope is allowed —
+        // otherwise picking one of them could not do anything.
+        const allowed = key => !VERSION_SCOPES.has(key) || feature('version');
+        const union = Object.keys(SNAPSHOT_SCOPE_LABELS).filter(key => counts.has(key)).filter(allowed);
+        const extras = feature('snapshot.addMissingScope')
+            ? Object.keys(SNAPSHOT_SCOPE_LABELS).filter(key => !counts.has(key)).filter(allowed)
+            : [];
+        const candidates = union;
+        if (!candidates.length && !extras.length) return toastr.info('选中的快照没有可更新的范围。', '一键快照');
+
+        // Sub-sources start from the union across the targets, so a source any
+        // of them records stays ticked.
+        const mergedSources = { worldSources: {}, regexSources: {} };
+        for (const snapshot of targets) {
+            for (const bucket of ['worldSources', 'regexSources']) {
+                for (const [source, on] of Object.entries(snapshot.scopes?.[bucket] ?? {})) {
+                    if (on === true) mergedSources[bucket][source] = true;
+                }
+            }
+        }
+
+        chosen = await chooseSnapshotScopes({
+            title: `刷新 ${targets.length} 个快照的范围`,
+            hint: feature('snapshot.addMissingScope')
+                ? '勾选的范围会用当前状态覆盖，没勾的保持原样。缺少所选范围的快照会补上该范围，右侧数字是已包含该范围的快照数。'
+                : '勾选的范围会用当前状态覆盖，没勾的保持原样。每个快照只更新它自己包含的范围，右侧数字就是包含该范围的快照数。',
+            candidates,
+            sources: mergedSources,
+            counts,
+            total: targets.length,
+            confirmVersions: true,
+            extras,
+        });
+        if (!chosen) return;
+    }
+
+    const addMissing = feature('snapshot.addMissingScope');
+    let changed = 0;
+    let skipped = 0;
+    for (const snapshot of targets) {
+        const keys = chosen?.scopes ?? heldScopes(snapshot.scopes);
+        const applied = keys.length && await refreshSnapshotScopes(snapshot, keys, {
+            addMissing: Boolean(chosen) && addMissing,
+            worldSources: chosen?.worldSources,
+            regexSources: chosen?.regexSources,
+        });
+        if (applied) changed++;
+        else skipped++;
+    }
+
+    if (changed) saveSettingsDebounced();
+    toastr.success(`已更新 ${changed} 个快照${skipped ? `，跳过 ${skipped} 个（未包含所选范围）` : ''}。`, '一键快照');
 }
 
 function normalizedSnapshotScopes(scopes = {}) {
@@ -1819,6 +2224,8 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         if (snapshot.scopes?.api) await applyApiState(payload.api);
         if (snapshot.scopes?.regex) await applyRegex(payload.regex);
         binding().lastAppliedSnapshotId = snapshot.id;
+        // Powers the "最近应用" ordering in the library.
+        snapshot.appliedAt = Date.now();
         saveSettingsDebounced();
         saveMetadataDebounced();
         if (!silent) toastr.success(`${incompatible.length ? '已应用兼容内容' : '已应用'}：${snapshot.name}`, '一键快照');
@@ -2504,6 +2911,7 @@ async function deleteNativeGreetingIndexes(root, indexes) {
 }
 
 function decorateNativeAlternateGreetings() {
+    if (!feature('greeting')) return;
     const character = currentCharacter();
     if (!character?.avatar) return;
     $('dialog.popup .alternate_grettings').each((_, node) => {
@@ -2626,10 +3034,22 @@ function decorateNativeAlternateGreetings() {
                 dragHandle = $('<div class="menu_button ocs-native-greeting-drag-handle fa-solid fa-grip-vertical" title="拖拽排序"></div>');
                 controls.find('.move_up_alternate_greeting').before(dragHandle);
             }
-            titleRow.find('.ocs-native-greeting-number, .ocs-native-greeting-group-badge').remove();
+            titleRow.find('.ocs-native-greeting-number, .ocs-native-greeting-group-badge, .ocs-native-greeting-snapshot-badge').remove();
             summaryTitle.text(entry.metadata.name || `其他开场白 #${index + 1}`);
             if (entry.metadata.name) titleRow.append($('<small class="ocs-native-greeting-number"></small>').text(`#${index + 1}`));
             if (entry.metadata.group) titleRow.append($('<small class="ocs-native-greeting-group-badge"></small>').text(entry.metadata.group));
+
+            // Which snapshot this greeting opens with. Without it the binding is
+            // only visible from the snapshot's own card, so there is no way to
+            // tell from here which greetings are wired up and which are not.
+            const bound = greetingBindingRecords(character)[entry.key];
+            const boundSnapshot = bound?.snapshotId ? getSnapshot(bound.snapshotId) : null;
+            if (boundSnapshot) {
+                titleRow.append($('<small class="ocs-native-greeting-snapshot-badge"></small>')
+                    .toggleClass('is-disabled', bound.enabled === false)
+                    .attr('title', `选到这条开场白时会应用快照「${boundSnapshot.name}」${bound.enabled === false ? '（已停用）' : ''}`)
+                    .append('<i class="fa-solid fa-camera"></i>', $('<span></span>').text(boundSnapshot.name)));
+            }
 
             let renameButton = controls.find('.ocs-native-greeting-rename');
             let groupButton = controls.find('.ocs-native-greeting-group-edit');
@@ -2681,6 +3101,7 @@ function scheduleNativeGreetingDecoration() {
 }
 
 function captureNativeGreetingControls(event) {
+    if (!feature('greeting')) return;
     if (!(event.target instanceof Element)) return;
     const control = event.target.closest('.move_up_alternate_greeting, .move_down_alternate_greeting, .delete_alternate_greeting');
     if (!control) return;
@@ -2752,6 +3173,7 @@ const REGEX_MAXIMIZE_FIELDS = [
  * `data-for`, so an injected button behaves exactly like the built-in ones.
  */
 function decorateRegexEditorFields() {
+    if (!feature('native.regexMaximize')) return;
     const dialog = document.querySelector('dialog.popup[open]');
     if (!dialog) return;
 
@@ -2783,6 +3205,32 @@ function installNativeEditorMaximizers() {
             decorateRegexEditorFields();
         });
     }).observe(document.body, { childList: true, subtree: true });
+}
+
+/* -------------------------------------------- preset macro autocomplete -- */
+
+/**
+ * Stops the macro autocomplete from popping up while typing in the preset
+ * prompt editor.
+ *
+ * SillyTavern has a global "Show in all macro fields" switch, but the preset
+ * editor's textarea is marked `data-macros-autocomplete="always"` in the
+ * markup, and `always` bypasses that switch — so no setting can quiet this
+ * particular field. Downgrading it to the default mode hands it back to the
+ * user's own preference; Ctrl+Space still forces the list open.
+ *
+ * The attribute has to change before the field is initialised: the mode is read
+ * once and captured, and the observer skips elements it has already set up.
+ */
+function installPresetMacroAutocompleteFix() {
+    const relax = () => {
+        if (!feature('native.quietMacroAutocomplete')) return;
+        for (const node of document.querySelectorAll('[data-macros-autocomplete="always"]')) {
+            node.setAttribute('data-macros-autocomplete', 'default');
+        }
+    };
+    relax();
+    new MutationObserver(relax).observe(document.body, { childList: true, subtree: true });
 }
 
 /* -------------------------------------------- character bulk action buttons -- */
@@ -3256,14 +3704,38 @@ async function setVersionGroup(type, versionId) {
     saveSettingsDebounced();
 }
 
+/** Ways to order a version library, in dropdown order. */
+const VERSION_SORTS = {
+    'updated-desc': { label: '最近更新', compare: (a, b) => b.updatedAt - a.updatedAt },
+    'updated-asc': { label: '最早更新', compare: (a, b) => a.updatedAt - b.updatedAt },
+    'created-desc': { label: '最近创建', compare: (a, b) => b.createdAt - a.createdAt },
+    'created-asc': { label: '最早创建', compare: (a, b) => a.createdAt - b.createdAt },
+    'name-asc': { label: '名称 A-Z', compare: (a, b) => String(a.name).localeCompare(String(b.name)) },
+    'name-desc': { label: '名称 Z-A', compare: (a, b) => String(b.name).localeCompare(String(a.name)) },
+};
+
+function versionSort() {
+    const stored = settings().versionSort;
+    return Object.hasOwn(VERSION_SORTS, stored) ? stored : 'updated-desc';
+}
+
+/** Removes a version and any reference to it, without asking. */
+function removeVersion(type, versionId) {
+    const context = versionContext(type);
+    const index = context.list.findIndex(item => item.id === versionId);
+    if (index === -1) return false;
+    context.list.splice(index, 1);
+    if (type === 'character' && settings().activeCharacterVersions[currentCharacter()?.avatar] === versionId) delete settings().activeCharacterVersions[currentCharacter()?.avatar];
+    if (type === 'persona' && settings().activePersonaVersions[user_avatar] === versionId) delete settings().activePersonaVersions[user_avatar];
+    return true;
+}
+
 async function deleteVersion(type, versionId) {
     const context = versionContext(type);
     const version = context.list.find(item => item.id === versionId);
     if (!version) return;
     if (!await Popup.show.confirm(`删除${context.title}`, `删除“${version.name}”？已保存的快照不会受影响。`)) return;
-    context.list.splice(context.list.findIndex(item => item.id === versionId), 1);
-    if (type === 'character' && settings().activeCharacterVersions[currentCharacter()?.avatar] === versionId) delete settings().activeCharacterVersions[currentCharacter()?.avatar];
-    if (type === 'persona' && settings().activePersonaVersions[user_avatar] === versionId) delete settings().activePersonaVersions[user_avatar];
+    removeVersion(type, versionId);
     pruneVersionGroups(type);
     saveSettingsDebounced();
     refreshVersionIndicators();
@@ -3469,11 +3941,12 @@ async function openVersionManager(type) {
     const context = versionContext(type);
     if (!context.capture()) return toastr.warning(`请先选择${type === 'character' ? '角色' : '用户人设'}。`, '一键快照');
     if (pruneVersionGroups(type)) saveSettingsDebounced();
-    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button><button class="ocs-button ocs-version-name-mirror"></button></div><div class="ocs-version-list"></div></div>`);
+    const root = $(`<div class="ocs-version-popup"><header><span class="ocs-kicker">VERSION LIBRARY</span><h3>${context.title}</h3><p>展开版本可查看和编辑描述；保存当前正在使用的版本会同步原生描述框，保存其他版本只更新版本本身。</p></header><div class="ocs-version-toolbar"><button class="ocs-button ocs-version-compare"><i class="fa-solid fa-code-compare"></i> 对比版本</button><button class="ocs-button ocs-version-blank"><i class="fa-solid fa-plus"></i> 新建空白版本</button><button class="ocs-button ocs-version-copy"><i class="fa-solid fa-copy"></i> 另存当前描述</button><button class="ocs-button ocs-version-auto-sync"></button><button class="ocs-button ocs-version-name-mirror"></button></div><div class="ocs-library-heading"><div class="ocs-library-tools"><select class="text_pole ocs-version-filter"></select><button type="button" class="ocs-button ocs-icon-button ocs-version-expand" title="全部展开"><i class="fa-solid fa-angles-down"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-version-collapse" title="全部折叠"><i class="fa-solid fa-angles-up"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-version-bulk" title="批量操作"><i class="fa-solid fa-list-check"></i></button><span class="ocs-library-bulk-only ocs-bulk-count">0</span><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-version-bulk-all" title="全选 / 取消全选"><i class="fa-solid fa-check-double"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-version-bulk-group" title="移动选中的版本到分组"><i class="fa-solid fa-folder-tree"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-danger ocs-library-bulk-only ocs-version-bulk-delete" title="删除选中的版本"><i class="fa-solid fa-trash"></i></button></div><div class="ocs-library-footer"><div class="ocs-version-pagination"></div><select class="text_pole ocs-library-sort ocs-version-sort" title="排序方式"></select></div></div><div class="ocs-version-list"></div></div>`);
     const expandedVersionIds = new Set();
     let expansionInitialized = false;
     const syncButton = root.find('.ocs-version-auto-sync');
     const renderAutoSyncButton = () => {
+        // Same value the settings panel edits, so the two never disagree.
         const enabled = settings().autoSyncVersions === true;
         syncButton.toggleClass('ocs-auto-sync-enabled', enabled).html(`<i class="fa-solid ${enabled ? 'fa-toggle-on' : 'fa-toggle-off'}"></i> 同步描述到版本`).attr('title', '开启后，原生描述框的修改会自动保存到当前应用版本。');
     };
@@ -3524,57 +3997,184 @@ async function openVersionManager(type) {
         refreshNameMirrorLocks();
         render();
     });
+    const selection = new Set();
+    let bulkMode = false;
+    let page = 1;
+
+    const visibleVersions = () => {
+        const fresh = versionContext(type);
+        const wanted = String(root.find('.ocs-version-filter').val() ?? '__all__');
+        const compare = VERSION_SORTS[versionSort()].compare;
+        return fresh.list
+            .filter(version => wanted === '__all__' || (version.group || '未分组') === wanted)
+            .sort((a, b) => {
+                // The version in use stays on top whatever the order, the same
+                // way the library pins the snapshot in use.
+                const currentOrder = Number(b.id === fresh.current?.id) - Number(a.id === fresh.current?.id);
+                return currentOrder || compare(a, b);
+            });
+    };
+
+    const updateBulkControls = () => {
+        // A class, not .toggle(): `.ocs-button` is `display: inline-flex !important`.
+        root.find('.ocs-library-tools').toggleClass('ocs-bulk-on', bulkMode);
+        root.find('.ocs-bulk-count').text(String(selection.size));
+        root.find('.ocs-version-bulk').toggleClass('ocs-primary', bulkMode);
+    };
+
+    const renderFilter = () => {
+        const select = root.find('.ocs-version-filter');
+        const previous = String(select.val() ?? '__all__');
+        const groups = [...new Set(versionContext(type).list.map(version => version.group || '未分组'))];
+        select.empty().append('<option value="__all__">全部分组</option>');
+        for (const group of groups) select.append($('<option></option>').attr('value', group).text(group));
+        select.val(groups.includes(previous) ? previous : '__all__');
+    };
+
+    const renderCard = (version, current) => {
+        const card = $('<details class="ocs-version-card"></details>')
+            .attr('data-ocs-version-id', version.id)
+            .toggleClass('ocs-active-version', current?.id === version.id)
+            .prop('open', expandedVersionIds.has(version.id));
+        card.on('toggle', () => {
+            if (card.prop('open')) expandedVersionIds.add(version.id);
+            else expandedVersionIds.delete(version.id);
+        });
+
+        const summary = $('<summary></summary>');
+        if (bulkMode) {
+            const tick = $('<input type="checkbox" class="ocs-card-tick">').prop('checked', selection.has(version.id));
+            tick.on('click', event => event.stopPropagation());
+            tick.on('change', function () {
+                if (this.checked) selection.add(version.id);
+                else selection.delete(version.id);
+                updateBulkControls();
+            });
+            summary.append(tick);
+        }
+        summary.append($('<strong></strong>').text(version.name));
+        if (version.group) summary.append($('<span class="ocs-card-group"></span>').text(version.group));
+        summary.append($('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
+        card.append(summary, versionPreview(type, version));
+
+        const actions = $('<div class="ocs-card-actions"></div>');
+        if (current?.id === version.id && !versionDataEquals(type, version.data, captureVersionFormState(type))) {
+            card.append($('<div class="ocs-version-change-state"></div>').text('原生描述已更改'));
+            actions.append($('<button class="ocs-button ocs-primary">更新</button>').on('click', async () => { await updateCurrentVersion(type); render(); }));
+        }
+        actions.append($('<button class="ocs-button">展开编辑</button>').on('click', async () => { await openVersionDescriptionEditor(type, version); render(); }));
+        actions.append($('<button class="ocs-button">头像</button>').on('click', async () => { await openVersionAvatarPicker(type, version); render(); }));
+        actions.append($('<button class="ocs-button">应用</button>').on('click', async () => { await applyVersion(type, version.id); render(); }));
+        actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameVersion(type, version.id); render(); }));
+        actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setVersionGroup(type, version.id); render(); }));
+        actions.append($('<button class="ocs-button ocs-danger">删除</button>').on('click', async () => { await deleteVersion(type, version.id); render(); }));
+        card.append(actions);
+        return card;
+    };
+
     const render = () => {
         const list = root.find('.ocs-version-list').empty();
+        const pager = root.find('.ocs-version-pagination');
         const fresh = versionContext(type);
         if (!expansionInitialized) {
             if (fresh.current?.id) expandedVersionIds.add(fresh.current.id);
             expansionInitialized = true;
         }
-        if (!fresh.list.length) list.append('<div class="ocs-empty">还没有版本。可新建空白版本，或把当前原生描述另存为版本。</div>');
-        const orderedVersions = [...fresh.list].sort((a, b) => {
-            const currentOrder = Number(b.id === fresh.current?.id) - Number(a.id === fresh.current?.id);
-            return currentOrder || b.updatedAt - a.updatedAt;
-        });
-        const grouped = new Map();
-        for (const version of orderedVersions) {
-            const group = version.group || '未分组';
-            if (!grouped.has(group)) grouped.set(group, []);
-            grouped.get(group).push(version);
+        renderFilter();
+
+        const versions = visibleVersions();
+        const visibleIds = new Set(versions.map(version => version.id));
+        for (const id of [...selection]) {
+            if (!visibleIds.has(id)) selection.delete(id);
         }
-        const renderCards = versions => {
-            const fragment = $('<div class="ocs-version-cards"></div>');
-            for (const version of versions) {
-                const card = $('<details class="ocs-version-card"></details>')
-                    .attr('data-ocs-version-id', version.id)
-                    .toggleClass('ocs-active-version', fresh.current?.id === version.id)
-                    .prop('open', expandedVersionIds.has(version.id));
-                card.on('toggle', () => {
-                    if (card.prop('open')) expandedVersionIds.add(version.id);
-                    else expandedVersionIds.delete(version.id);
-                });
-                const summary = $('<summary></summary>');
-                summary.append($('<strong></strong>').text(version.name), $('<small></small>').text(`更新于 ${new Date(version.updatedAt).toLocaleString()}`));
-                card.append(summary, versionPreview(type, version));
-                const actions = $('<div class="ocs-card-actions"></div>');
-                if (fresh.current?.id === version.id && !versionDataEquals(type, version.data, captureVersionFormState(type))) {
-                    card.append($('<div class="ocs-version-change-state"></div>').text('原生描述已更改'));
-                    actions.append($('<button class="ocs-button ocs-primary">更新</button>').on('click', async () => { await updateCurrentVersion(type); render(); }));
-                }
-                actions.append($('<button class="ocs-button">展开编辑</button>').on('click', async () => { await openVersionDescriptionEditor(type, version); render(); }));
-                actions.append($('<button class="ocs-button">头像</button>').on('click', async () => { await openVersionAvatarPicker(type, version); render(); }));
-                actions.append($('<button class="ocs-button">应用</button>').on('click', async () => { await applyVersion(type, version.id); render(); }));
-                actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameVersion(type, version.id); render(); }));
-                actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setVersionGroup(type, version.id); render(); }));
-                actions.append($('<button class="ocs-button ocs-danger">删除</button>').on('click', async () => { await deleteVersion(type, version.id); render(); }));
-                card.append(actions); fragment.append(card);
-            }
-            return fragment;
-        };
-        const hasGroups = versionGroups(type).length > 0 || fresh.list.some(version => version.group);
-        if (!hasGroups) list.append(renderCards(orderedVersions));
-        else for (const [group, versions] of grouped) list.append($('<details class="ocs-snapshot-group" open></details>').append($('<summary></summary>').text(`${group} · ${versions.length}`), renderCards(versions)));
+        updateBulkControls();
+
+        if (!versions.length) {
+            pager.empty();
+            return list.append('<div class="ocs-empty">还没有版本。可新建空白版本，或把当前原生描述另存为版本。</div>');
+        }
+
+        const perPage = Number(accountStorage.getItem(VERSION_PAGE_KEY)) || 10;
+        pager.pagination({
+            dataSource: versions,
+            pageSize: perPage,
+            sizeChangerOptions: SNAPSHOT_PAGE_SIZES,
+            pageRange: 1,
+            pageNumber: page,
+            position: 'top',
+            showPageNumbers: false,
+            showSizeChanger: true,
+            formatSizeChanger: renderPaginationDropdown(perPage, SNAPSHOT_PAGE_SIZES),
+            prevText: '<',
+            nextText: '>',
+            formatNavigator: PAGINATION_TEMPLATE,
+            showNavigator: true,
+            callback: function (data) {
+                list.empty();
+                for (const version of data) list.append(renderCard(version, fresh.current));
+                localizePagination(pager);
+            },
+            afterSizeSelectorChange: function (event, size) {
+                accountStorage.setItem(VERSION_PAGE_KEY, event.target.value);
+                paginationDropdownChangeHandler(event, size);
+            },
+            afterPaging: function (current) {
+                page = current;
+            },
+        });
     };
+
+    const sortSelect = root.find('.ocs-version-sort');
+    for (const [value, { label }] of Object.entries(VERSION_SORTS)) {
+        sortSelect.append($('<option></option>').attr('value', value).text(label));
+    }
+    sortSelect.val(versionSort()).on('change', function () {
+        settings().versionSort = String($(this).val());
+        saveSettingsDebounced();
+        page = 1;
+        render();
+    });
+    root.find('.ocs-version-filter').on('change', () => { page = 1; render(); });
+    root.find('.ocs-version-expand').on('click', () => root.find('.ocs-version-card').prop('open', true).each((_, node) => expandedVersionIds.add(node.dataset.ocsVersionId)));
+    root.find('.ocs-version-collapse').on('click', () => root.find('.ocs-version-card').prop('open', false).each((_, node) => expandedVersionIds.delete(node.dataset.ocsVersionId)));
+    root.find('.ocs-version-bulk').on('click', () => {
+        bulkMode = !bulkMode;
+        if (!bulkMode) selection.clear();
+        render();
+    });
+    root.find('.ocs-version-bulk-all').on('click', () => {
+        const ids = visibleVersions().map(version => version.id);
+        const allPicked = ids.length > 0 && ids.every(id => selection.has(id));
+        selection.clear();
+        if (!allPicked) for (const id of ids) selection.add(id);
+        render();
+    });
+    root.find('.ocs-version-bulk-group').on('click', async () => {
+        if (!selection.size) return toastr.info('请先选择版本。', '一键快照');
+        const group = await chooseGroup('', versionGroups(type), { title: '移动到分组', okButton: '确认移动' });
+        if (group === null) return;
+        for (const version of versionContext(type).list) {
+            if (selection.has(version.id)) version.group = group;
+        }
+        if (group && !versionGroups(type).includes(group)) versionGroups(type).push(group);
+        pruneVersionGroups(type);
+        saveSettingsDebounced();
+        render();
+    });
+    root.find('.ocs-version-bulk-delete').on('click', async () => {
+        const ids = [...selection];
+        if (!ids.length) return toastr.info('请先选择版本。', '一键快照');
+        const names = ids.map(id => versionContext(type).list.find(item => item.id === id)?.name).filter(Boolean).join('、');
+        if (!await Popup.show.confirm(`删除${context.title}`, `删除这 ${ids.length} 个版本？<br><br>${names}<br><br>已保存的快照不会受影响。`)) return;
+        for (const id of ids) removeVersion(type, id);
+        selection.clear();
+        bulkMode = false;
+        pruneVersionGroups(type);
+        saveSettingsDebounced();
+        refreshVersionIndicators();
+        render();
+    });
+
     root.find('.ocs-version-blank').on('click', async () => { await createBlankVersion(type); render(); });
     root.find('.ocs-version-copy').on('click', async () => { await saveCurrentAsVersion(type); render(); });
     root.find('.ocs-version-compare').on('click', () => openVersionComparison(type));
@@ -3665,7 +4265,7 @@ async function configureSnapshotScopeSources(state, key) {
     const configuration = SNAPSHOT_SCOPE_SOURCE_OPTIONS[key];
     if (!configuration) return true;
     const root = $('<div class="ocs-scope-source-picker"></div>');
-    root.append($('<p></p>').text('选择本次更新要记录的范围；这些改动会在点击快照“更新”后才保存。'));
+    root.append($('<p></p>').text('选择要记录的来源。确定后立即生效，并按当前状态重新录入这一项。'));
     const choices = $('<div class="ocs-scope-source-choices"></div>');
     for (const [source, label] of configuration.options) {
         const input = $('<input type="checkbox">').val(source).prop('checked', state[configuration.sourcesKey][source] === true);
@@ -3686,38 +4286,71 @@ async function configureSnapshotScopeSources(state, key) {
     return true;
 }
 
-function scopeBadges(snapshot) {
-    // This is intentionally draft-only state. It belongs to the rendered card,
-    // never to settings, so closing the library discards unfinished edits.
-    const state = normalizedSnapshotScopes(snapshot.scopes);
-    const badges = $('<div class="ocs-scope-badges ocs-editable-scope-badges"></div>').data('ocsScopeDraft', state);
+/**
+ * The scope badges on a snapshot card. Editing them changes what the snapshot
+ * records, and takes effect at once.
+ *
+ * Editing the scope set and refreshing the recorded state are two different
+ * intents, and they used to share one button: the badges were a draft that only
+ * landed when "更新" ran, which both entangled them and meant a batch could not
+ * see pending edits. They are separate now — "更新" only refreshes, and every
+ * change here is incremental, touching nothing but the scope being changed.
+ *
+ * @param {object} snapshot Snapshot to edit
+ * @param {() => void} onChange Called after a change is saved
+ */
+function scopeBadges(snapshot, onChange = () => {}) {
+    const badges = $('<div class="ocs-scope-badges ocs-editable-scope-badges"></div>');
+
+    /** Records one scope from the current state, leaving the others alone. */
+    const capture = async (key) => {
+        const applied = await refreshSnapshotScopes(snapshot, [key], { addMissing: true });
+        // buildSnapshot already explains exactly why it refused, so a second,
+        // vaguer toast on top of it only adds noise.
+        if (!applied) return false;
+        saveSettingsDebounced();
+        onChange();
+        return true;
+    };
+
     const render = () => {
         badges.empty();
-        const present = SNAPSHOT_SCOPE_TAGS.filter(([key]) => state[key]);
+        const present = SNAPSHOT_SCOPE_TAGS.filter(([key]) => snapshot.scopes?.[key] === true);
         for (const [key, label] of present) {
             const tag = $('<span class="ocs-scope-badge ocs-scope-tag"></span>');
             const configuration = SNAPSHOT_SCOPE_SOURCE_OPTIONS[key];
             if (configuration) {
                 tag.append($('<button type="button" class="ocs-scope-tag-configure"></button>')
-                    .attr('title', `编辑${label}的记录范围`)
+                    .attr('title', `编辑${label}的记录来源`)
                     .text(label)
                     .on('click', async () => {
-                        if (await configureSnapshotScopeSources(state, key)) render();
+                        const draft = normalizedSnapshotScopes(snapshot.scopes);
+                        if (!await configureSnapshotScopeSources(draft, key)) return;
+                        // Recording from different places means the stored
+                        // content has to come from those places too.
+                        snapshot.scopes[configuration.sourcesKey] = draft[configuration.sourcesKey];
+                        await capture(key);
+                        render();
                     }));
             } else {
                 tag.append(document.createTextNode(label));
             }
-            const remove = $('<button type="button" class="ocs-scope-tag-remove" title="从本次更新中移除"></button>')
-                .attr('aria-label', `从本次更新中移除${label}`)
+            tag.append($('<button type="button" class="ocs-scope-tag-remove"></button>')
+                .attr({ title: `不再记录${label}`, 'aria-label': `不再记录${label}` })
                 .append('<i class="fa-solid fa-xmark"></i>')
-                .on('click', () => {
-                    state[key] = false;
+                .on('click', async () => {
+                    if (!await Popup.show.confirm('移除记录范围', `这个快照将不再记录${label}，已经记下的内容会丢失。`)) return;
+                    snapshot.payload[key] = null;
+                    snapshot.scopes[key] = false;
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                    onChange();
                     render();
-                });
-            tag.append(remove);
+                }));
             badges.append(tag);
         }
-        const available = SNAPSHOT_SCOPE_TAGS.filter(([key]) => !state[key]);
+
+        const available = SNAPSHOT_SCOPE_TAGS.filter(([key]) => snapshot.scopes?.[key] !== true);
         if (!available.length) return;
         const add = $('<button type="button" class="ocs-scope-add" title="添加记录范围" aria-label="添加记录范围"><i class="fa-solid fa-plus"></i></button>');
         add.on('click', async () => {
@@ -3731,33 +4364,24 @@ function scopeBadges(snapshot) {
             });
             popup.dlg.classList.add('ocs-dialog');
             if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return;
+
             const key = String(selector.val());
-            if (SNAPSHOT_SCOPE_SOURCE_OPTIONS[key]) {
-                if (!await configureSnapshotScopeSources(state, key)) return;
-            } else {
-                state[key] = true;
+            const configuration = SNAPSHOT_SCOPE_SOURCE_OPTIONS[key];
+            if (configuration) {
+                const draft = normalizedSnapshotScopes(snapshot.scopes);
+                if (!await configureSnapshotScopeSources(draft, key)) return;
+                snapshot.scopes[configuration.sourcesKey] = draft[configuration.sourcesKey];
             }
+            // Recorded straight away: a scope with no content behind it would
+            // be a snapshot that cannot be applied.
+            await capture(key);
             render();
         });
         badges.append(add);
     };
+
     render();
     return badges;
-}
-
-function scopeBadgeDraft(badges) {
-    const state = badges.data('ocsScopeDraft');
-    return {
-        character: state.character === true,
-        persona: state.persona === true,
-        theme: state.theme === true,
-        worldInfo: state.worldInfo === true,
-        preset: state.preset === true,
-        api: state.api === true,
-        regex: state.regex === true,
-        worldSources: state.worldInfo ? deepClone(state.worldSources) : {},
-        regexSources: state.regex ? deepClone(state.regexSources) : {},
-    };
 }
 
 function hasSnapshotScope(scopes) {
@@ -3964,151 +4588,243 @@ async function showSnapshotContents(snapshot) {
     await showOcsPopup(root);
 }
 
-function renderSnapshotList(root) {
-    const expandedGroups = new Set(root.find('.ocs-snapshot-group[open]').toArray().map(element => element.dataset.ocsGroup));
-    const list = root.find('.ocs-snapshot-list').empty();
+/** Per-page choices for the snapshot library, mirroring SillyTavern's lists. */
+const SNAPSHOT_PAGE_SIZES = [5, 10, 25, 50, 100];
+const SNAPSHOT_PAGE_KEY = 'OcsSnapshots_PerPage';
+const VERSION_PAGE_KEY = 'OcsVersions_PerPage';
+
+/** Ids of the snapshots ticked while bulk mode is on. */
+const snapshotSelection = new Set();
+let snapshotBulkMode = false;
+let snapshotPage = 1;
+
+/** Deletes a snapshot and every reference to it. */
+function deleteSnapshotById(id) {
+    const snapshot = getSnapshot(id);
+    if (!snapshot) return;
+    const themeManagerBindings = themeManagerCharacterBindings();
+    const snapshotTheme = themeNameFromPayload(snapshot.payload);
+    settings().snapshots = settings().snapshots.filter(item => item.id !== id);
+    if (binding().snapshotId === id) binding().snapshotId = null;
+    if (binding().lastAppliedSnapshotId === id) binding().lastAppliedSnapshotId = null;
+    delete settings().snapshotBindings[id];
+    for (const [avatar, record] of Object.entries(settings().characterBindings)) {
+        if (record?.snapshotId === id) {
+            if (themeManagerBindings?.[avatar] === snapshotTheme) delete themeManagerBindings[avatar];
+            delete settings().characterBindings[avatar];
+        }
+    }
+    for (const [avatar, records] of Object.entries(settings().greetingBindings)) {
+        for (const [key, record] of Object.entries(records ?? {})) {
+            if (record?.snapshotId === id) delete settings().greetingBindings[avatar][key];
+        }
+        if (!Object.keys(settings().greetingBindings[avatar] ?? {}).length) delete settings().greetingBindings[avatar];
+    }
+}
+
+/** Ways to order the library, in the order they appear in the dropdown. */
+const SNAPSHOT_SORTS = {
+    'updated-desc': { label: '最近更新', compare: (a, b) => b.updatedAt - a.updatedAt },
+    'updated-asc': { label: '最早更新', compare: (a, b) => a.updatedAt - b.updatedAt },
+    'created-desc': { label: '最近创建', compare: (a, b) => b.createdAt - a.createdAt },
+    'created-asc': { label: '最早创建', compare: (a, b) => a.createdAt - b.createdAt },
+    'applied-desc': { label: '最近应用', compare: (a, b) => (b.appliedAt ?? 0) - (a.appliedAt ?? 0) || b.updatedAt - a.updatedAt },
+    'name-asc': { label: '名称 A-Z', compare: (a, b) => String(a.name).localeCompare(String(b.name)) },
+    'name-desc': { label: '名称 Z-A', compare: (a, b) => String(b.name).localeCompare(String(a.name)) },
+};
+
+function librarySort() {
+    const stored = settings().librarySort;
+    return Object.hasOwn(SNAPSHOT_SORTS, stored) ? stored : 'updated-desc';
+}
+
+/** The snapshots matching the current group filter, search box and sort. */
+function visibleSnapshots(root) {
     const filter = String(root.find('.ocs-library-filter').val() ?? '__all__');
     const query = String(root.find('.ocs-library-search').val() ?? '').trim().toLocaleLowerCase();
-    const searching = Boolean(query);
-    const wasSearching = root.data('ocsLibrarySearching') === true;
-    if (searching && !wasSearching) root.data('ocsLibraryExpandedBeforeSearch', [...expandedGroups]);
-    root.data('ocsLibrarySearching', searching);
-    const restoredGroups = !searching && wasSearching
-        ? new Set(root.data('ocsLibraryExpandedBeforeSearch') ?? [])
-        : expandedGroups;
-    if (!searching && wasSearching) root.removeData('ocsLibraryExpandedBeforeSearch');
     const activeSnapshotId = currentAppliedSnapshotId();
-    const snapshots = [...settings().snapshots]
+    const compare = SNAPSHOT_SORTS[librarySort()].compare;
+    return [...settings().snapshots]
         .filter(snapshot => filter === '__all__' || (snapshot.group ?? '') === filter)
         .filter(snapshot => !query || `${snapshot.name ?? ''} ${snapshot.group ?? ''}`.toLocaleLowerCase().includes(query))
         .sort((a, b) => {
+            // The snapshot in use stays on top whatever the order: with the list
+            // paginated, it would otherwise be several pages away.
             const currentOrder = Number(b.id === activeSnapshotId) - Number(a.id === activeSnapshotId);
-            return currentOrder || b.updatedAt - a.updatedAt;
+            return currentOrder || compare(a, b);
         });
-    if (!snapshots.length) return list.append(`<div class="ocs-empty">${query ? '没有匹配的快照。' : '这个分组还没有快照。'}</div>`);
-    const grouped = new Map();
-    for (const snapshot of snapshots) {
-        const group = snapshot.group || '未分组';
-        if (!grouped.has(group)) grouped.set(group, []);
-        grouped.get(group).push(snapshot);
+}
+
+/** One snapshot, collapsed to its summary until opened. */
+function renderSnapshotCard(root, snapshot) {
+    const isBound = binding().snapshotId === snapshot.id;
+    const characterBindings = snapshotCharacterBindings(snapshot.id);
+    const greetingBindings = snapshotGreetingBindings(snapshot.id);
+    const currentCharacterDefault = currentCharacterBinding()?.snapshotId === snapshot.id;
+    const currentGreetingBindings = greetingBindings.filter(item => item.avatar === currentCharacter()?.avatar);
+    const isActive = currentAppliedSnapshotId() === snapshot.id;
+
+    const card = $('<details class="ocs-snapshot-card"></details>')
+        .attr('data-ocs-snapshot-id', snapshot.id)
+        .toggleClass('ocs-bound', isBound || characterBindings.length > 0)
+        .toggleClass('ocs-active', isActive);
+
+    const summary = $('<summary></summary>');
+    if (snapshotBulkMode) {
+        const tick = $('<input type="checkbox" class="ocs-card-tick">').prop('checked', snapshotSelection.has(snapshot.id));
+        tick.on('click', event => event.stopPropagation());
+        tick.on('change', function () {
+            if (this.checked) snapshotSelection.add(snapshot.id);
+            else snapshotSelection.delete(snapshot.id);
+            updateSnapshotBulkControls(root);
+        });
+        summary.append(tick);
     }
-    const renderCards = (items) => {
-        const cards = $('<div class="ocs-snapshot-cards"></div>');
-        for (const snapshot of items) {
-            const isBound = binding().snapshotId === snapshot.id;
-            const characterBindings = snapshotCharacterBindings(snapshot.id);
-            const greetingBindings = snapshotGreetingBindings(snapshot.id);
-            const currentCharacterDefault = currentCharacterBinding()?.snapshotId === snapshot.id;
-            const currentGreetingBindings = greetingBindings.filter(item => item.avatar === currentCharacter()?.avatar);
-            const card = $('<article class="ocs-snapshot-card"></article>')
-                .toggleClass('ocs-bound', isBound || characterBindings.length > 0);
-            const cardHeader = $('<div class="ocs-card-header"></div>');
-            cardHeader.append($('<h4></h4>').text(snapshot.name));
-            card.append(cardHeader);
-            card.append($('<time></time>').text(`更新于 ${new Date(snapshot.updatedAt).toLocaleString()}`));
-            const scopeTags = scopeBadges(snapshot);
-            card.append(scopeTags);
-            const boundChats = snapshotChatBindings(snapshot.id);
-            if (boundChats.length) {
-                const currentChat = currentChatReference();
-                const labels = boundChats.map(chat => `${chat.name}${isBound && binding().enabled === false && chat.id === currentChat?.id ? '（已停用）' : ''}`);
-                card.append($('<p class="ocs-bound-chats"></p>').text(`已绑定：${labels.join('、')}`));
-            }
-            if (characterBindings.length) {
-                const labels = characterBindings.map(item => `${item.name}${item.enabled ? '' : '（已停用）'}`);
-                card.append($('<p class="ocs-bound-chats"></p>').text(`角色默认：${labels.join('、')}`));
-            }
-            if (greetingBindings.length) {
-                const labels = greetingBindings.map(item => `${item.characterName} · ${item.label}${item.enabled ? '' : '（已停用）'}`);
-                card.append($('<p class="ocs-bound-chats"></p>').text(`开场白：${labels.join('、')}`));
-            }
-            const actions = $('<div class="ocs-card-actions"></div>');
-            actions.append($('<button class="ocs-button">应用</button>').on('click', async () => {
-                if (await applySnapshot(snapshot)) renderSnapshotList(root);
-            }));
-            actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot)));
-            actions.append($('<button class="ocs-button">更新</button>').on('click', async () => {
-                const scopes = scopeBadgeDraft(scopeTags);
-                if (!hasSnapshotScope(scopes)) {
-                    toastr.warning('至少保留一个记录范围。', '一键快照');
-                    return;
-                }
-                if (await updateSnapshot(snapshot, scopes)) renderSnapshotList(root);
-            }));
-            actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameSnapshot(snapshot); renderSnapshotList(root); }));
-            actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setSnapshotGroup(snapshot); renderGroups(root); renderSnapshotList(root); }));
-            actions.append($(`<button class="ocs-button">${isBound ? '解绑聊天' : '绑定聊天'}</button>`).on('click', async () => {
-                if (await bindSnapshot(isBound ? null : snapshot.id)) renderSnapshotList(root);
-            }));
-            if (isBound) {
-                const enabled = binding().enabled !== false;
-                actions.append($(`<button class="ocs-button">${enabled ? '停用聊天应用' : '启用聊天应用'}</button>`).on('click', () => {
-                    toggleBinding();
-                    renderSnapshotList(root);
-                }));
-            }
-            actions.append($(`<button class="ocs-button">${currentCharacterDefault ? '解绑角色' : '绑定角色'}</button>`).on('click', async () => {
-                const changed = currentCharacterDefault
-                    ? unbindSnapshotFromCurrentCharacter(snapshot.id)
-                    : await bindSnapshotToCurrentCharacter(snapshot);
-                if (changed) renderSnapshotList(root);
-            }));
-            if (currentCharacterDefault) {
-                const enabled = currentCharacterBinding()?.enabled !== false;
-                actions.append($(`<button class="ocs-button">${enabled ? '停用角色应用' : '启用角色应用'}</button>`).on('click', async () => {
-                    if (await toggleCurrentCharacterBinding(snapshot.id)) renderSnapshotList(root);
-                }));
-            }
-            actions.append($('<button class="ocs-button">绑定开场白</button>').on('click', async () => {
-                if (await bindSnapshotToGreeting(snapshot)) renderSnapshotList(root);
-            }));
-            if (currentGreetingBindings.length) {
-                actions.append($('<button class="ocs-button">解绑开场白</button>').on('click', async () => {
-                    if (await unbindSnapshotFromGreeting(snapshot.id)) renderSnapshotList(root);
-                }));
-            }
-            actions.append($('<button class="ocs-button ocs-danger">删除</button>').on('click', async () => {
-                if (!await Popup.show.confirm('删除快照', `删除“${snapshot.name}”？角色、世界书和预设本身不会删除。`)) return;
-                const themeManagerBindings = themeManagerCharacterBindings();
-                const snapshotTheme = themeNameFromPayload(snapshot.payload);
-                settings().snapshots = settings().snapshots.filter(item => item.id !== snapshot.id);
-                if (binding().snapshotId === snapshot.id) binding().snapshotId = null;
-                if (binding().lastAppliedSnapshotId === snapshot.id) binding().lastAppliedSnapshotId = null;
-                delete settings().snapshotBindings[snapshot.id];
-                for (const [avatar, record] of Object.entries(settings().characterBindings)) {
-                    if (record?.snapshotId === snapshot.id) {
-                        if (themeManagerBindings?.[avatar] === snapshotTheme) delete themeManagerBindings[avatar];
-                        delete settings().characterBindings[avatar];
-                    }
-                }
-                for (const [avatar, records] of Object.entries(settings().greetingBindings)) {
-                    for (const [key, record] of Object.entries(records ?? {})) {
-                        if (record?.snapshotId === snapshot.id) delete settings().greetingBindings[avatar][key];
-                    }
-                    if (!Object.keys(settings().greetingBindings[avatar] ?? {}).length) delete settings().greetingBindings[avatar];
-                }
-                pruneSnapshotGroups();
-                saveSettingsDebounced(); saveMetadataDebounced(); renderGroups(root); renderSnapshotList(root);
-            }));
-            card.append(actions); cards.append(card);
+    summary.append($('<span class="ocs-card-title"></span>').text(snapshot.name));
+    if (snapshot.group) summary.append($('<span class="ocs-card-group"></span>').text(snapshot.group));
+    summary.append($('<time></time>').text(new Date(snapshot.updatedAt).toLocaleString()));
+    card.append(summary);
+
+    const body = $('<div class="ocs-card-body"></div>');
+    body.append(scopeBadges(snapshot, () => renderSnapshotList(root)));
+
+    const boundChats = snapshotChatBindings(snapshot.id);
+    if (boundChats.length) {
+        const currentChat = currentChatReference();
+        const labels = boundChats.map(chat => `${chat.name}${isBound && binding().enabled === false && chat.id === currentChat?.id ? '（已停用）' : ''}`);
+        body.append($('<p class="ocs-bound-chats"></p>').text(`已绑定：${labels.join('、')}`));
+    }
+    if (characterBindings.length) {
+        body.append($('<p class="ocs-bound-chats"></p>').text(`角色默认：${characterBindings.map(item => `${item.name}${item.enabled ? '' : '（已停用）'}`).join('、')}`));
+    }
+    if (greetingBindings.length) {
+        body.append($('<p class="ocs-bound-chats"></p>').text(`开场白：${greetingBindings.map(item => `${item.characterName} · ${item.label}${item.enabled ? '' : '（已停用）'}`).join('、')}`));
+    }
+
+    const actions = $('<div class="ocs-card-actions"></div>');
+    actions.append($('<button class="ocs-button">应用</button>').on('click', async () => {
+        if (await applySnapshot(snapshot)) renderSnapshotList(root);
+    }));
+    actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot)));
+    actions.append($('<button class="ocs-button">更新</button>').on('click', async () => {
+        if (!hasSnapshotScope(snapshot.scopes)) {
+            toastr.warning('这个快照没有记录范围，先在上方添加一个。', '一键快照');
+            return;
         }
-        return cards;
-    };
-    // A selected group is already an explicit category. Showing a second
-    // collapsible header around it only wastes space, particularly on mobile.
-    // The expandable group overview belongs exclusively to “全部分组”.
-    const hasNamedGroups = settings().snapshotGroups.length > 0 || snapshots.some(snapshot => snapshot.group);
-    if (filter !== '__all__' || !hasNamedGroups) {
-        list.append(renderCards(snapshots));
-        return;
+        if (await updateSnapshot(snapshot)) renderSnapshotList(root);
+    }));
+    actions.append($('<button class="ocs-button">重命名</button>').on('click', async () => { await renameSnapshot(snapshot); renderSnapshotList(root); }));
+    actions.append($('<button class="ocs-button">分组</button>').on('click', async () => { await setSnapshotGroup(snapshot); renderGroups(root); renderSnapshotList(root); }));
+    actions.append($(`<button class="ocs-button">${isBound ? '解绑聊天' : '绑定聊天'}</button>`).on('click', async () => {
+        if (await bindSnapshot(isBound ? null : snapshot.id)) renderSnapshotList(root);
+    }));
+    if (isBound) {
+        const enabled = binding().enabled !== false;
+        actions.append($(`<button class="ocs-button">${enabled ? '停用聊天应用' : '启用聊天应用'}</button>`).on('click', () => {
+            toggleBinding();
+            renderSnapshotList(root);
+        }));
     }
-    for (const [group, items] of grouped) {
-        const section = $('<details class="ocs-snapshot-group"></details>');
-        section.attr('data-ocs-group', group).prop('open', searching || restoredGroups.has(group) || items.some(snapshot => snapshot.id === activeSnapshotId));
-        section.append($('<summary></summary>').text(`${group} · ${items.length}`));
-        section.append(renderCards(items));
-        list.append(section);
+    actions.append($(`<button class="ocs-button">${currentCharacterDefault ? '解绑角色' : '绑定角色'}</button>`).on('click', async () => {
+        const changed = currentCharacterDefault
+            ? unbindSnapshotFromCurrentCharacter(snapshot.id)
+            : await bindSnapshotToCurrentCharacter(snapshot);
+        if (changed) renderSnapshotList(root);
+    }));
+    if (currentCharacterDefault) {
+        const enabled = currentCharacterBinding()?.enabled !== false;
+        actions.append($(`<button class="ocs-button">${enabled ? '停用角色应用' : '启用角色应用'}</button>`).on('click', async () => {
+            if (await toggleCurrentCharacterBinding(snapshot.id)) renderSnapshotList(root);
+        }));
     }
+    actions.append($('<button class="ocs-button">绑定开场白</button>').on('click', async () => {
+        if (await bindSnapshotToGreeting(snapshot)) renderSnapshotList(root);
+    }));
+    if (currentGreetingBindings.length) {
+        actions.append($('<button class="ocs-button">解绑开场白</button>').on('click', async () => {
+            if (await unbindSnapshotFromGreeting(snapshot.id)) renderSnapshotList(root);
+        }));
+    }
+    actions.append($('<button class="ocs-button ocs-danger">删除</button>').on('click', async () => {
+        if (!await Popup.show.confirm('删除快照', `删除“${snapshot.name}”？角色、世界书和预设本身不会删除。`)) return;
+        deleteSnapshotById(snapshot.id);
+        pruneSnapshotGroups();
+        saveSettingsDebounced();
+        saveMetadataDebounced();
+        renderGroups(root);
+        renderSnapshotList(root);
+    }));
+    body.append(actions);
+    card.append(body);
+    return card;
+}
+
+/** Keeps the bulk toolbar in step with the current selection. */
+function updateSnapshotBulkControls(root) {
+    // A class, not .toggle(): `.ocs-button` is `display: inline-flex !important`,
+    // and an inline `display: none` from jQuery loses to it.
+    root.find('.ocs-library-tools').toggleClass('ocs-bulk-on', snapshotBulkMode);
+    root.find('.ocs-bulk-count').text(String(snapshotSelection.size));
+    root.find('.ocs-library-bulk').toggleClass('ocs-primary', snapshotBulkMode);
+}
+
+/**
+ * Renders the snapshot library: one flat, paginated list of collapsible cards.
+ *
+ * Groups used to be collapsible sections here, which meant two nested levels of
+ * folding and a page that got taller the more groups existed. The group filter
+ * already answers "show me one group", so the list itself stays flat.
+ */
+function renderSnapshotList(root) {
+    const open = new Set(root.find('.ocs-snapshot-card[open]').toArray().map(node => node.dataset.ocsSnapshotId));
+    const list = root.find('.ocs-snapshot-list').empty();
+    const pager = root.find('.ocs-library-pagination');
+    const snapshots = visibleSnapshots(root);
+
+    // Ticks on snapshots that scrolled out of the filter would be invisible but
+    // still act on the next bulk operation.
+    const visibleIds = new Set(snapshots.map(snapshot => snapshot.id));
+    for (const id of [...snapshotSelection]) {
+        if (!visibleIds.has(id)) snapshotSelection.delete(id);
+    }
+    updateSnapshotBulkControls(root);
+
+    if (!snapshots.length) {
+        pager.empty();
+        const query = String(root.find('.ocs-library-search').val() ?? '').trim();
+        return list.append(`<div class="ocs-empty">${query ? '没有匹配的快照。' : '这个分组还没有快照。'}</div>`);
+    }
+
+    const perPage = Number(accountStorage.getItem(SNAPSHOT_PAGE_KEY)) || 10;
+    pager.pagination({
+        dataSource: snapshots,
+        pageSize: perPage,
+        sizeChangerOptions: SNAPSHOT_PAGE_SIZES,
+        pageRange: 1,
+        pageNumber: snapshotPage,
+        position: 'top',
+        showPageNumbers: false,
+        showSizeChanger: true,
+        formatSizeChanger: renderPaginationDropdown(perPage, SNAPSHOT_PAGE_SIZES),
+        prevText: '<',
+        nextText: '>',
+        formatNavigator: PAGINATION_TEMPLATE,
+        showNavigator: true,
+        callback: function (data) {
+            list.empty();
+            for (const snapshot of data) {
+                list.append(renderSnapshotCard(root, snapshot).prop('open', open.has(snapshot.id)));
+            }
+            localizePagination(pager);
+        },
+        afterSizeSelectorChange: function (event, size) {
+            accountStorage.setItem(SNAPSHOT_PAGE_KEY, event.target.value);
+            paginationDropdownChangeHandler(event, size);
+        },
+        afterPaging: function (page) {
+            snapshotPage = page;
+        },
+    });
 }
 
 function renderGroups(root) {
@@ -4148,7 +4864,7 @@ async function openSnapshotPopup() {
                     </div>
                     <button class="ocs-button ocs-primary ocs-capture-button"><i class="fa-solid fa-camera"></i> 保存快照</button>
                 </section>
-                <section class="ocs-library"><div class="ocs-library-heading"><div><h4>快照库</h4></div><div class="ocs-library-controls"><input class="text_pole ocs-library-search" type="search" placeholder="搜索快照名称"><select class="text_pole ocs-library-filter"></select></div></div><div class="ocs-snapshot-list"></div></section>
+                <section class="ocs-library"><div class="ocs-library-heading"><div><h4>快照库</h4></div><div class="ocs-library-controls"><input class="text_pole ocs-library-search" type="search" placeholder="搜索快照名称"><select class="text_pole ocs-library-filter"></select></div><div class="ocs-library-tools"><button type="button" class="ocs-button ocs-icon-button ocs-library-expand" title="全部展开"><i class="fa-solid fa-angles-down"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-collapse" title="全部折叠"><i class="fa-solid fa-angles-up"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk" title="批量操作"><i class="fa-solid fa-list-check"></i></button><span class="ocs-library-bulk-only ocs-bulk-count">0</span><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-bulk-all" title="全选 / 取消全选"><i class="fa-solid fa-check-double"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-bulk-refresh" title="更新选中的快照"><i class="fa-solid fa-rotate"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-bulk-drop" title="移除选中快照的某个范围"><i class="fa-solid fa-eraser"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-library-bulk-only ocs-bulk-group" title="移动选中的快照到分组"><i class="fa-solid fa-folder-tree"></i></button><button type="button" class="ocs-button ocs-icon-button ocs-danger ocs-library-bulk-only ocs-bulk-delete" title="删除选中的快照"><i class="fa-solid fa-trash"></i></button></div><div class="ocs-library-footer"><div class="ocs-library-pagination"></div><select class="text_pole ocs-library-sort" title="排序方式"></select></div></div><div class="ocs-snapshot-list"></div></section>
             </div>
         </div>`);
     const applyCaptureScopeSelection = () => {
@@ -4156,6 +4872,18 @@ async function openSnapshotPopup() {
         root.find('input[data-snapshot-scope]').each((_, input) => {
             input.checked = saved[input.value] === true;
         });
+        // The character and persona scopes are the version feature: they store
+        // a version reference, not content. With versions switched off there is
+        // nothing to point at, so take them out rather than let a snapshot
+        // capture something the user can no longer manage.
+        if (!feature('version')) {
+            for (const scope of VERSION_SCOPES) {
+                const input = root.find(`input[data-snapshot-scope][value="${scope}"]`);
+                // A class, not .hide(): `.checkbox_label.ocs-scope` is
+                // `display: flex !important`, which an inline style loses to.
+                input.prop('checked', false).closest('.ocs-scope').addClass('ocs-feature-off');
+            }
+        }
         root.find('.ocs-world-scope:not(.ocs-regex-scope) .ocs-world-sources input').each((_, input) => {
             input.checked = saved.worldSources?.[input.value] === true;
         });
@@ -4175,6 +4903,65 @@ async function openSnapshotPopup() {
         settings().lastCaptureScopes = saved;
         saveSettingsDebounced();
     };
+    const sortSelect = root.find('.ocs-library-sort');
+    for (const [value, { label }] of Object.entries(SNAPSHOT_SORTS)) {
+        sortSelect.append($('<option></option>').attr('value', value).text(label));
+    }
+    sortSelect.val(librarySort()).on('change', function () {
+        settings().librarySort = String($(this).val());
+        saveSettingsDebounced();
+        snapshotPage = 1;
+        renderSnapshotList(root);
+    });
+
+    root.find('.ocs-library-expand').on('click', () => root.find('.ocs-snapshot-card').prop('open', true));
+    root.find('.ocs-library-collapse').on('click', () => root.find('.ocs-snapshot-card').prop('open', false));
+    root.find('.ocs-library-bulk').on('click', () => {
+        snapshotBulkMode = !snapshotBulkMode;
+        if (!snapshotBulkMode) snapshotSelection.clear();
+        renderSnapshotList(root);
+    });
+    root.find('.ocs-bulk-all').on('click', () => {
+        const ids = visibleSnapshots(root).map(snapshot => snapshot.id);
+        const allPicked = ids.length > 0 && ids.every(id => snapshotSelection.has(id));
+        snapshotSelection.clear();
+        if (!allPicked) for (const id of ids) snapshotSelection.add(id);
+        renderSnapshotList(root);
+    });
+    root.find('.ocs-bulk-refresh').on('click', async () => {
+        await batchUpdateSnapshots([...snapshotSelection]);
+        renderSnapshotList(root);
+    });
+    root.find('.ocs-bulk-drop').on('click', async () => {
+        await batchRemoveScopes([...snapshotSelection]);
+        renderSnapshotList(root);
+    });
+    root.find('.ocs-bulk-group').on('click', async () => {
+        if (!snapshotSelection.size) return toastr.info('请先选择快照。', '一键快照');
+        const group = await chooseGroup('', settings().snapshotGroups, { title: '移动到分组', okButton: '确认移动' });
+        if (group === null) return;
+        for (const id of snapshotSelection) {
+            const snapshot = getSnapshot(id);
+            if (snapshot) snapshot.group = group;
+        }
+        pruneSnapshotGroups();
+        saveSettingsDebounced();
+        renderGroups(root);
+        renderSnapshotList(root);
+    });
+    root.find('.ocs-bulk-delete').on('click', async () => {
+        const ids = [...snapshotSelection];
+        if (!ids.length) return toastr.info('请先选择快照。', '一键快照');
+        const names = ids.map(id => getSnapshot(id)?.name).filter(Boolean).join('、');
+        if (!await Popup.show.confirm('删除快照', `删除这 ${ids.length} 个快照？<br><br>${names}<br><br>角色、世界书和预设本身不会删除。`)) return;
+        for (const id of ids) deleteSnapshotById(id);
+        snapshotSelection.clear();
+        pruneSnapshotGroups();
+        saveSettingsDebounced();
+        saveMetadataDebounced();
+        renderGroups(root);
+        renderSnapshotList(root);
+    });
     root.find('.ocs-capture-button').on('click', async () => {
         const scopes = Object.fromEntries(root.find('.ocs-scope-grid input[data-snapshot-scope]:checked').toArray().map(input => [input.value, true]));
         if (!Object.keys(scopes).length) return toastr.warning('至少选择一项。', '一键快照');
@@ -4234,8 +5021,15 @@ function registerQrAssistantShortcut() {
 }
 
 function renderQrShortcut() {
-    registerQrAssistantShortcut();
     const existing = document.getElementById('one_click_snapshot_qr');
+    // The quick-reply button is the only way into the library, so the master
+    // switch takes it away with the rest of the feature. Handled here rather
+    // than at install time so the switch applies without a reload.
+    if (!feature('snapshot')) {
+        existing?.remove();
+        return;
+    }
+    registerQrAssistantShortcut();
     const bar = document.getElementById('qr--bar');
     if (!bar) return;
     const isCombined = window.quickReplyApi?.settings?.isCombined === true;
@@ -4462,31 +5256,42 @@ async function onChatChanged() {
 
 $(async () => {
     settings();
+    initFeatures(settings);
+    onFeatureChange(applyFeatureState);
+    installFeatureSettings();
+    setTimeout(installFeatureSettings, 1000);
     if (syncStoredSnapshotVersionNames()) saveSettingsDebounced();
+
+    // Keeping snapshots pointed at a renamed theme, and the version avatar
+    // picker, are part of their features rather than switchable extras.
     installThemeRenameObserver();
     setTimeout(installThemeRenameObserver, 1000);
+    // Everything installs unconditionally and the feature guards decide whether
+    // it does anything. Listeners and observers are cheap; a teardown path that
+    // has to unbind them all is where the bugs would be.
     installAvatarGallerySelectionObserver();
     setTimeout(installAvatarGallerySelectionObserver, 1000);
-    registerQrAssistantShortcut();
-    installQrShortcut();
     installVersionMenu();
-    installGreetingCatalogIntegration();
     installVersionAutoSync();
+    installQrShortcut();
+    installGreetingCatalogIntegration();
     installPersonaManager(settings);
     installPersonaTitleLock();
+    installPresetMacroAutocompleteFix();
     installNativeEditorMaximizers();
     installCharacterBulkActionButtons();
     setTimeout(installCharacterBulkActionButtons, 1000);
+    applyFeatureState();
     eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
     eventSource.on(event_types.PERSONA_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
     setTimeout(refreshNameMirrorLocks, 0);
     eventSource.on(event_types.SETTINGS_UPDATED, refreshConnectionStatusDisplay);
-    eventSource.on(event_types.CHAT_CHANGED, onChatChanged);
-    eventSource.on(event_types.CHAT_RENAMED, updateChatBindingAfterRename);
-    eventSource.on(event_types.GENERATION_STARTED, applyGreetingSnapshotBeforeGeneration);
-    eventSource.on(event_types.MESSAGE_SWIPED, applyGreetingSnapshotAfterSwipe);
-    eventSource.on(event_types.MESSAGE_RECEIVED, promoteGreetingSnapshotAfterReply);
-    eventSource.on(event_types.GENERATION_STOPPED, markGreetingGenerationStopped);
+    eventSource.on(event_types.CHAT_CHANGED, whenSnapshot(onChatChanged));
+    eventSource.on(event_types.CHAT_RENAMED, whenSnapshot(updateChatBindingAfterRename));
+    eventSource.on(event_types.GENERATION_STARTED, whenSnapshot(applyGreetingSnapshotBeforeGeneration));
+    eventSource.on(event_types.MESSAGE_SWIPED, whenSnapshot(applyGreetingSnapshotAfterSwipe));
+    eventSource.on(event_types.MESSAGE_RECEIVED, whenSnapshot(promoteGreetingSnapshotAfterReply));
+    eventSource.on(event_types.GENERATION_STOPPED, whenSnapshot(markGreetingGenerationStopped));
     eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(refreshVersionIndicators, 0));
     // Chat-bound / character-bound personas are selected asynchronously after
     // CHAT_CHANGED. Refresh again once SillyTavern has finished selecting the

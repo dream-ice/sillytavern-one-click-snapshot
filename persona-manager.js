@@ -67,6 +67,9 @@ let listObserver = null;
 let decorating = false;
 let decorateQueued = false;
 
+/** Master switch, mirrored from the settings panel so hooks can go inert. */
+let managerEnabled = true;
+
 /** Transient view state. Not persisted: filters should not survive a reload. */
 let folderTagId = null;
 let favoriteFilter = FILTER_STATE.UNDEFINED;
@@ -585,6 +588,7 @@ function shuffle(items) {
  * @returns {string[]}
  */
 function filterPersonas(avatarIds) {
+    if (!managerEnabled) return avatarIds;
     let result = [...avatarIds];
 
     // The pinned cards render these above the list, so drop them here to avoid
@@ -873,6 +877,7 @@ function pinnedPersonaIds() {
 function renderCurrentPersonaRow() {
     const list = $('#user_avatar_block');
     list.find('.ocs-persona-current-label, .ocs-persona-current-card, .ocs-persona-current-sep').remove();
+    if (!managerEnabled) return;
 
     const { ids, label: labelText } = pinnedPersonaIds();
     if (!ids.length) return;
@@ -970,6 +975,14 @@ function decorateCard(card, avatarId) {
 function decorateCards() {
     const list = $('#user_avatar_block');
     if (!list.length) return;
+    if (!managerEnabled) {
+        // Everything this module injects into a card is removable, so turning
+        // the feature off leaves the stock list behind without a reload.
+        list.removeClass('ocs-persona-bulk-mode').find('.ocs-persona-card-tags').remove();
+        list.find('.avatar-container').removeClass('ocs-persona-fav ocs-persona-selected');
+        renderCurrentPersonaRow();
+        return;
+    }
 
     list.toggleClass('ocs-persona-bulk-mode', bulkMode);
     $('#ocs_persona_folders').toggleClass('ocs-persona-bulk-mode', bulkMode);
@@ -1575,7 +1588,7 @@ function installTagInput() {
 
 /** Repaints the favorite state and tag chips for the currently open persona. */
 function refreshDetailPane() {
-    const available = Boolean(user_avatar && power_user.personas?.[user_avatar]);
+    const available = managerEnabled && Boolean(user_avatar && power_user.personas?.[user_avatar]);
     $('#ocs_persona_tags').toggle(available);
     $('#ocs_persona_favorite').toggle(available).toggleClass('ocs-persona-fav-on', available && meta(user_avatar).favorite === true);
     if (!available) return;
@@ -1595,6 +1608,32 @@ function refreshDetailPane() {
 }
 
 /* ------------------------------------------------------------------ setup -- */
+
+/**
+ * Turns the whole persona manager on or off in place.
+ *
+ * Nothing is uninstalled: the observers and the filter hook stay put and simply
+ * go inert, and the injected chrome is hidden rather than destroyed. That keeps
+ * the switch instant in both directions without a teardown path that could
+ * leave half-removed listeners behind.
+ *
+ * @param {boolean} enabled Desired state
+ */
+export function setPersonaManagerEnabled(enabled) {
+    managerEnabled = Boolean(enabled);
+    $('#ocs_persona_tag_controls, #ocs_persona_folders, #ocs_persona_usage_refresh, #ocs_persona_bulk_edit, #ocs_persona_tags, #ocs_persona_favorite').toggle(managerEnabled);
+    $('#persona_sort_order option[value^="ocs-"]').prop('disabled', !managerEnabled);
+    if (!managerEnabled) {
+        bulkMode = false;
+        bulkSelection.clear();
+        updateBulkControls();
+        // A stored sort order of ours would leave the list unsorted once our
+        // comparator stops running.
+        if (isCustomOrder()) power_user.persona_sort_order = 'asc';
+    }
+    refreshDetailPane();
+    refreshFilterUi();
+}
 
 /**
  * Installs the persona management enhancements.

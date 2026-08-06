@@ -1,6 +1,6 @@
 {
   "display_name": "一键快照",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "js": "index.js",
   "css": "style.css",
   "author": "icedream",
