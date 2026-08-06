@@ -666,20 +666,41 @@ function applyChipState(chip, chipState) {
 
 /* --------------------------------------------------------------- rendering -- */
 
-/** Injects the toolbar buttons, filter row and folder row once. */
-function installPanelChrome() {
-    const sortSelect = $('#persona_sort_order');
-    if (!sortSelect.length || sortSelect.find('option[value="ocs-newest"]').length) return;
+/**
+ * Brings our entries in the native sort select in line with the feature switch.
+ *
+ * They are removed rather than hidden or disabled: `display: none` on an
+ * `<option>` does nothing in Safari, and a disabled entry still occupies the
+ * list looking like something the user failed to click.
+ *
+ * @param {JQuery<HTMLElement>} [sortSelect] Defaults to the native select
+ */
+function syncSortOrders(sortSelect = $('#persona_sort_order')) {
+    if (!sortSelect.length) return;
 
-    for (const [value, label] of Object.entries(SORT_ORDERS)) {
-        sortSelect.append($('<option></option>').attr('value', value).text(label));
+    sortSelect.find('option[value^="ocs-"]').remove();
+    if (managerEnabled) {
+        for (const [value, label] of Object.entries(SORT_ORDERS)) {
+            sortSelect.append($('<option></option>').attr('value', value).text(label));
+        }
     }
-    // A value we added is only valid while this extension is loaded. Fall back
-    // to A-Z if the stored order came from an older/other install.
+    // One of our orders is only selectable while our entries are present. Fall
+    // back to A-Z whenever the stored one is no longer in the list, which also
+    // covers an order left behind by an older or different install.
     if (!sortSelect.find(`option[value="${CSS.escape(currentSortOrder())}"]`).length) {
         power_user.persona_sort_order = 'asc';
     }
     sortSelect.val(currentSortOrder());
+}
+
+/** Injects the toolbar buttons, filter row and folder row once. */
+function installPanelChrome() {
+    const sortSelect = $('#persona_sort_order');
+    // Keyed on the filter row this function creates below, not on our sort
+    // entries: those come and go with the feature switch.
+    if (!sortSelect.length || $('#ocs_persona_tag_controls').length) return;
+
+    syncSortOrders(sortSelect);
 
     // Re-sorting must not silently reuse a stale archive scan, so the select
     // triggers the first scan itself and the button forces a fresh one.
@@ -1622,14 +1643,13 @@ function refreshDetailPane() {
 export function setPersonaManagerEnabled(enabled) {
     managerEnabled = Boolean(enabled);
     $('#ocs_persona_tag_controls, #ocs_persona_folders, #ocs_persona_usage_refresh, #ocs_persona_bulk_edit, #ocs_persona_tags, #ocs_persona_favorite').toggle(managerEnabled);
-    $('#persona_sort_order option[value^="ocs-"]').prop('disabled', !managerEnabled);
+    // Also resets a stored order of ours, which would otherwise leave the list
+    // unsorted once our comparator stops running.
+    syncSortOrders();
     if (!managerEnabled) {
         bulkMode = false;
         bulkSelection.clear();
         updateBulkControls();
-        // A stored sort order of ours would leave the list unsorted once our
-        // comparator stops running.
-        if (isCustomOrder()) power_user.persona_sort_order = 'asc';
     }
     refreshDetailPane();
     refreshFilterUi();

@@ -84,7 +84,10 @@
 .ocs-version-popup select.ocs-library-sort { flex: 0 0 auto; width: auto; min-width: 0; min-height: 28px; }
 /* Sort sits with the pager: both are about how the list is laid out, and the
    search row stays two controls wide. */
-.ocs-library-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* Pagination left, sort right. `flex-end` on the row rather than
+   `space-between`, so the sort still lands on the right edge on the pages
+   where there is only one page and the pagination collapses away. */
+.ocs-library-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .ocs-library-sort { flex: 0 0 auto; width: auto; min-width: 0; min-height: 28px; }
 .ocs-snapshot-list { display: flex; flex-direction: column; gap: 6px; }
 
@@ -98,7 +101,7 @@
 .ocs-library-tools.ocs-bulk-on .ocs-library-bulk-only { display: inline-flex !important; }
 .ocs-library-tools.ocs-bulk-on span.ocs-bulk-count { display: inline-block !important; margin-left: 3px; padding-left: 8px; border-left: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 18%, transparent); }
 .ocs-bulk-count { min-width: 1.4em; color: var(--SmartThemeQuoteColor); font-size: .82em; font-weight: 700; text-align: center; }
-.ocs-library-pagination { display: flex; justify-content: flex-start; min-height: 0; }
+.ocs-library-pagination { display: flex; justify-content: flex-start; min-height: 0; margin-right: auto; }
 .ocs-library-pagination:empty { display: none; }
 
 /* Cards collapse to a single summary line; only what is open costs height. */
@@ -264,7 +267,9 @@
    single-class specificity, and a theme redeclaring it later would otherwise
    win and stretch this back out, pushing the last button onto a second row. */
 .ocs-version-popup select.ocs-version-filter { box-sizing: border-box; flex: 0 1 clamp(96px, 13vw, 150px); width: clamp(96px, 13vw, 150px); min-width: 0; min-height: 30px; margin: 0 4px 0 0 !important; font: inherit !important; font-size: .84em !important; line-height: 1.2; }
-.ocs-version-pagination { display: flex; justify-content: flex-start; min-height: 0; }
+/* Same footer layout as the snapshot library: this pushes the sort select to
+   the right and keeps the pager itself on the left. */
+.ocs-version-pagination { display: flex; justify-content: flex-start; min-height: 0; margin-right: auto; }
 .ocs-version-pagination:empty { display: none; }
 .ocs-version-card > summary small { margin-left: auto; opacity: .65; font-size: .72em; white-space: nowrap; }
 .ocs-version-preview { margin-top: 9px; padding: 8px 9px; border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); }
@@ -448,8 +453,14 @@
     .ocs-library { padding-top: 0; }
     /* Search on its own row, the two dropdowns sharing the next one. */
     .ocs-library-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, .78fr); width: 100%; gap: 5px; }
-    .ocs-library-search,
-    .ocs-library-filter { box-sizing: border-box; width: 100%; min-width: 0; max-width: none; min-height: 32px; }
+    /* Matched to the specificity of the desktop rules above (`.ocs-popup
+       select.ocs-library-filter`), which pin the dropdown to a clamp() width.
+       A media query adds no specificity of its own, so the plain single-class
+       form loses and the row stops short of the right edge. */
+    .ocs-popup input.ocs-library-search,
+    .ocs-popup select.ocs-library-filter,
+    .ocs-version-popup input.ocs-library-search,
+    .ocs-version-popup select.ocs-library-filter { box-sizing: border-box; flex: 1 1 auto; width: 100%; min-width: 0; max-width: none; min-height: 32px; }
     .ocs-capture { padding: 11px; }
     .ocs-card-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; gap: 5px; }
     .ocs-card-actions .ocs-button { width: 100% !important; min-width: 0; padding: 5px 3px; white-space: normal !important; }
