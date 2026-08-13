@@ -95,7 +95,7 @@ export const FEATURES = [
             {
                 key: 'native.quietMacroAutocomplete',
                 label: '预设里不自动弹宏提示',
-                note: '在预设条目的提示词框里写 {{setvar::}} 这类宏时，酒馆会自动弹出补全和说明，挡住正在写的内容。\n\n开启后改为跟随用户设置里的「Show in all macro fields」；按 Ctrl+Space 仍可手动调出补全。',
+                note: '在预设条目的提示词框里写 {{setvar::}} 这类宏时，酒馆会自动弹出补全和说明，挡住正在写的内容。\n\n开启后，输入框里改为跟随用户设置里的「Show in all macro fields」，按 Ctrl+Space 仍可手动调出补全；点展开按钮进入的全屏编辑器里则完全不弹。',
             },
         ],
     },
@@ -303,16 +303,45 @@ function renderFeature(node) {
  */
 export function installFeatureSettings() {
     const host = $('#extensions_settings2');
-    if (!host.length || $('#ocs_feature_settings').length) return;
+    if (!host.length) return;
 
-    const drawer = $(
-        '<div id="ocs_feature_settings" class="inline-drawer">' +
-        '<div class="inline-drawer-toggle inline-drawer-header"><b>一键快照</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
-        '<div class="inline-drawer-content"><div class="ocs-settings"></div></div>' +
-        '</div>',
-    );
+    if (!$('#ocs_feature_settings').length) {
+        const drawer = $(
+            '<div id="ocs_feature_settings" class="inline-drawer">' +
+            '<div class="inline-drawer-toggle inline-drawer-header"><b>一键快照</b><div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div></div>' +
+            '<div class="inline-drawer-content"><div class="ocs-settings"></div></div>' +
+            '</div>',
+        );
 
-    const panel = drawer.find('.ocs-settings');
-    for (const node of FEATURES) panel.append(renderFeature(node));
-    host.append(drawer);
+        const panel = drawer.find('.ocs-settings');
+        for (const node of FEATURES) panel.append(renderFeature(node));
+        host.append(drawer);
+    }
+
+    watchHost(host[0]);
+}
+
+/** @type {MutationObserver|null} */
+let hostObserver = null;
+
+/**
+ * Puts the block back if it ever leaves the Extensions page.
+ *
+ * It has been seen to go missing when that page is opened while SillyTavern is
+ * still starting up. Nothing in SillyTavern empties the container, and the
+ * extension that does render into it only appends, so rather than pin the
+ * blame the block is simply restored whenever it is gone -- rebuilding it is
+ * cheap and reads the current values, so a restored block is never stale.
+ *
+ * @param {HTMLElement} host The container the block lives in
+ */
+function watchHost(host) {
+    if (hostObserver) return;
+
+    hostObserver = new MutationObserver(() => {
+        // Our own append re-enters here and finds the block present, so this
+        // settles after one extra pass rather than looping.
+        if (!$('#ocs_feature_settings').length) installFeatureSettings();
+    });
+    hostObserver.observe(host, { childList: true });
 }

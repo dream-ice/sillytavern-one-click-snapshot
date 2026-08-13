@@ -3227,10 +3227,33 @@ function installPresetMacroAutocompleteFix() {
         if (!feature('native.quietMacroAutocomplete')) return;
         for (const node of document.querySelectorAll('[data-macros-autocomplete="always"]')) {
             node.setAttribute('data-macros-autocomplete', 'default');
+            node.setAttribute('data-ocs-quiet-macros', '');
         }
     };
     relax();
     new MutationObserver(relax).observe(document.body, { childList: true, subtree: true });
+
+    // The expand button builds a brand new textarea and hardcodes the mode to
+    // `always` on it, so relaxing the attribute afterwards is too late: the
+    // mode is read once, when the element is initialised, and SillyTavern's own
+    // observer was created at import time and therefore runs before ours.
+    //
+    // Instead the source is marked as not carrying macros for the duration of
+    // the click. The copy inherits that and is skipped entirely, while the
+    // source keeps the completion it was given long ago -- its own instance
+    // already exists and is never rebuilt from the attribute.
+    document.addEventListener('click', event => {
+        if (!feature('native.quietMacroAutocomplete')) return;
+
+        const opener = /** @type {HTMLElement?} */ (event.target)?.closest?.('.editor_maximize');
+        const source = opener?.getAttribute('data-for') && document.getElementById(opener.getAttribute('data-for'));
+        if (!(source instanceof HTMLElement) || !source.hasAttribute('data-ocs-quiet-macros')) return;
+        if (source.dataset.macros === undefined || source.dataset.macros === 'false') return;
+
+        const original = source.dataset.macros;
+        source.dataset.macros = 'false';
+        setTimeout(() => { source.dataset.macros = original; }, 0);
+    }, true);
 }
 
 /* -------------------------------------------- character bulk action buttons -- */
