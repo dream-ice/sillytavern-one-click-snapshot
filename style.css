@@ -21,10 +21,55 @@
 .ocs-popup-header,
 .ocs-version-popup > header,
 .ocs-contents-popup > header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
     margin: 0 0 14px;
     padding: 0 0 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #777);
 }
+/* Drop control on a section, matching the badge remove on the cards. */
+.ocs-content-scope-remove { display: inline-grid; place-items: center; flex: 0 0 auto; width: 20px; height: 20px; margin-left: 4px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font-size: .74em; line-height: 1; opacity: .55; }
+.ocs-content-source-add { display: inline-grid; place-items: center; flex: 0 0 auto; width: 20px; height: 20px; margin-left: 4px; padding: 0; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor, #777) 80%, transparent); border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font-size: .68em; line-height: 1; opacity: .6; }
+.ocs-content-source-add:hover { border-color: var(--SmartThemeQuoteColor, #9cc); color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
+.ocs-content-scope-remove:hover { background: color-mix(in srgb, var(--warning, #c66) 26%, transparent); opacity: 1; }
+/* Owner and version side by side, wrapping to two rows on a narrow screen. */
+.ocs-version-pick-pair { display: flex; flex: 1 1 auto; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
+.ocs-version-pick-pair > select { flex: 1 1 130px; }
+
+.ocs-content-param { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 2px; font-size: .9em; }
+.ocs-content-param > span { min-width: 0; overflow-wrap: anywhere; opacity: .8; }
+.ocs-contents-popup input.ocs-content-param-input { flex: 0 1 150px; width: auto; min-width: 0; min-height: 28px; font-size: .92em; }
+.ocs-content-param-toggle { padding: 0; }
+
+/* Sits with the buttons rather than on one section, because edit mode is a
+   state of the whole page. */
+.ocs-content-editing-badge { display: none; margin-right: 2px; opacity: .55; font-size: .82em; white-space: nowrap; }
+.ocs-content-editing-badge.is-shown { display: inline; }
+.ocs-content-host { display: contents; }
+/* `.class + element` so a theme re-declaring `.text_pole { width: 100% }` after
+   us cannot stretch these back across the row. */
+.ocs-contents-popup select.ocs-content-select { flex: 1 1 160px; width: auto; min-width: 0; max-width: 100%; min-height: 30px; font-size: .9em; }
+
+/* Wrapped so one auto margin holds the pair at the row's end. Two buttons each
+   carrying `margin-left: auto` would split the free space and drift apart. */
+/* Title on the left, the add control at the row's end. The title's own bottom
+   margin moves to the row: left on the heading it makes the flex line taller
+   than the text, and the button then centres against that and sits low. */
+.ocs-content-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.ocs-content-title-row > h3 { min-width: 0; margin: 0 auto 0 0 !important; overflow-wrap: anywhere; }
+.ocs-content-edit-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; margin-left: auto; }
+.ocs-content-edit-toggle,
+.ocs-content-edit-cancel { padding: 3px 12px; font-size: .84em; white-space: nowrap; }
+.ocs-content-add-scope-button { display: none; place-items: center; flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor, #777) 80%, transparent); border-radius: 5px; background: transparent; color: inherit; cursor: pointer; font-size: .72em; line-height: 1; opacity: .6; }
+.ocs-content-add-scope-button.is-shown { display: inline-grid; }
+.ocs-content-add-scope-button:hover { border-color: var(--SmartThemeQuoteColor, #9cc); color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
+/* Two classes, not one: `.ocs-button` declares `display: inline-flex !important`
+   further down this file, and between two important declarations specificity
+   decides -- a single-class rule here would simply lose to it. */
+.ocs-contents-popup .ocs-content-edit-cancel { display: none !important; }
+.ocs-contents-popup .ocs-content-edit-cancel.is-shown { display: inline-flex !important; }
+.ocs-content-edit-toggle.ocs-active { border-color: var(--SmartThemeQuoteColor, #9cc); color: var(--SmartThemeQuoteColor, #9cc); }
 /* In QR's non-combined mode this is a third-party atom, never a full QR set. */
 #qr--bar > #one_click_snapshot_qr { flex: 0 0 auto; width: auto; min-width: max-content; }
 
@@ -129,6 +174,89 @@
 .ocs-scope-tag-remove:hover,
 .ocs-scope-add:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 20%, transparent); color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
 .ocs-scope-add { width: 20px; height: 20px; margin: 0; border: 1px dashed color-mix(in srgb, var(--SmartThemeBorderColor, #777) 80%, transparent); border-radius: 4px; font-size: .65em; }
+/* Lorebook edit mode: a flat list of books, each carrying its own slot
+   checkboxes. Flat because a book can sit in several slots at once, which a
+   grouped list can only show by repeating the book. */
+.ocs-world-book { display: grid; grid-template-columns: minmax(0, 1fr); gap: 5px; padding: 9px 0; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 12%, transparent); }
+.ocs-world-book:first-child { padding-top: 2px; border-top: 0; }
+.ocs-world-book-head { display: flex; align-items: center; gap: 7px; }
+.ocs-world-book-head b { min-width: 0; margin-right: auto; overflow-wrap: anywhere; font-weight: 650; }
+.ocs-world-book-head small { flex: 0 0 auto; opacity: .62; font-size: .84em; white-space: nowrap; }
+.ocs-world-missing { color: var(--warning, #c66); }
+.ocs-world-slots { display: flex; align-items: center; gap: 10px; font-size: .82em; }
+.ocs-world-slots > span { margin-right: auto; opacity: .6; }
+/* `--ocs-line` is what the shared switch draws its track border from; it is
+   declared on each block that uses a switch rather than globally. */
+.ocs-world-editing { --ocs-line: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 14%, transparent); }
+/* `minmax(0, 1fr)` is load-bearing: a grid's implicit track is sized to
+   max-content, so one long entry name widens the whole column past the popup
+   and everything to its right is clipped. */
+.ocs-world-entries { display: none; grid-template-columns: minmax(0, 1fr); gap: 0; margin-left: 4px; padding-left: 9px; border-left: 2px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 26%, transparent); }
+.ocs-world-entries.is-open { display: grid; }
+/* Toggle icon, the same one SillyTavern draws on preset prompt entries, so a
+   list of switches reads identically in both places. The real checkbox stays
+   for keyboard and screen readers and is only visually hidden. */
+.ocs-toggle-icon { flex: 0 0 auto; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-style: normal; font-size: 1.06em; line-height: 1; opacity: .5; }
+.ocs-toggle-icon::before { content: '\f204'; }
+/* `is-on` is for toggles with no checkbox behind them, such as the bulk one. */
+:checked ~ .ocs-toggle-icon,
+.ocs-toggle-icon.is-on { color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
+:checked ~ .ocs-toggle-icon::before,
+.ocs-toggle-icon.is-on::before { content: '\f205'; }
+
+/* The toggle leads the row and the row is only as wide as its content, so a
+   short entry does not leave a long empty gap before its switch. */
+.ocs-world-entry { position: relative; display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 100%; padding: 3px 8px 3px 4px; border-radius: 4px; cursor: pointer; font-size: .96em; line-height: 1.42; }
+.ocs-world-entry > span { min-width: 0; overflow-wrap: anywhere; }
+.ocs-world-entry:hover { background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 30%, transparent); }
+.ocs-world-entry input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+.ocs-world-entry > span { min-width: 0; overflow-wrap: anywhere; opacity: .72; }
+.ocs-world-entry:has(input:checked) > span { opacity: 1; }
+.ocs-world-entry:focus-within { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 1px; }
+
+/* The same toggle the entries use, so "everything in here" reads as one more
+   switch rather than as a pair of commands. */
+.ocs-world-bulk { display: inline-flex; flex: 0 0 auto; align-items: center; padding: 2px 4px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; line-height: 1; }
+.ocs-world-bulk:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 18%, transparent); }
+/* Hidden in the book header until its entries are on screen; the copies inside
+   the entry list always show, so this is scoped to the header. */
+.ocs-world-book-head > .ocs-world-bulk { display: none; }
+.ocs-world-book.is-expanded > .ocs-world-book-head > .ocs-world-bulk { display: inline-flex; }
+/* No focus ring on either toggle: several browsers treat a click on a <button>
+   or a <label> as keyboard-like focus, and a box appearing after every tap
+   reads as a glitch. Keyboard users still get the ring on the entry input. */
+.ocs-contents-popup .ocs-world-bulk:focus-visible,
+.ocs-contents-popup .ocs-world-entry:focus-visible { outline: none; }
+
+.ocs-world-entry-group > summary,
+.ocs-world-add-group > summary { display: flex; align-items: center; gap: 8px; min-height: 26px; padding: 2px 4px; border-radius: 4px; cursor: pointer; list-style: none; }
+.ocs-world-entry-group > summary::-webkit-details-marker,
+.ocs-world-add-group > summary::-webkit-details-marker { display: none; }
+.ocs-world-entry-group > summary::after,
+.ocs-world-add-group > summary::after { content: '\f078'; flex: 0 0 11px; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: .68em; opacity: .6; transition: transform var(--animation-duration, .18s) ease; }
+.ocs-world-entry-group[open] > summary::after,
+.ocs-world-add-group[open] > summary::after { transform: rotate(180deg); }
+.ocs-world-entry-group > summary:hover,
+.ocs-world-add-group > summary:hover { background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 27%, transparent); }
+/* Matched to the read-only view's own group heading, so a group does not
+   change size when the page flips into edit mode. */
+.ocs-world-entry-group > summary b { min-width: 0; margin-right: auto; overflow-wrap: anywhere; font-size: .95em; font-weight: 600; }
+.ocs-world-add-group > summary b { min-width: 0; margin-right: auto; overflow-wrap: anywhere; font-size: .9em; font-weight: 650; }
+.ocs-world-entry-group > summary small,
+.ocs-world-add-group > summary small { flex: 0 0 auto; opacity: .6; font-size: .8em; white-space: nowrap; }
+.ocs-world-entry-group > summary .ocs-world-bulk { margin-left: 2px; }
+.ocs-world-entry-group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; margin-left: 3px; padding-left: 9px; border-left: 1px dashed color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 18%, transparent); }
+/* Owner annotation beside a book name, in both the read-only and edit views. */
+.ocs-world-owner { font-size: .84em; font-weight: 400; opacity: .55; }
+.ocs-world-empty { display: block; padding: 4px 0; opacity: .6; font-size: .84em; }
+.ocs-world-add-open { margin-top: 10px; padding: 3px 12px; font-size: .84em; white-space: nowrap; }
+.ocs-world-add-panel { display: none; gap: 2px; margin-top: 7px; }
+.ocs-world-add-panel.is-open { display: grid; grid-template-columns: minmax(0, 1fr); }
+/* Capped and scrollable: the global group lists every lorebook on the server. */
+.ocs-world-add-group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; max-height: 210px; margin-left: 3px; padding-left: 6px; overflow-y: auto; border-left: 1px dashed color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 20%, transparent); }
+.ocs-world-add-item { padding: 4px 7px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: .84em; text-align: left; }
+.ocs-world-add-item:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 20%, transparent); color: var(--SmartThemeQuoteColor, #9cc); }
+
 .ocs-scope-source-picker { display: grid; gap: 8px; min-width: min(310px, 78vw); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
 .ocs-scope-source-picker p { margin: 0; opacity: .74; font-size: .86em; line-height: 1.4; }
 .ocs-scope-source-choices { display: grid; gap: 3px; padding: 3px 0; }
@@ -190,8 +318,15 @@
 .ocs-content-drawer:not([open]) > summary::after { transform: rotate(-90deg); }
 .ocs-content-drawer > summary:hover { background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 27%, transparent); }
 .ocs-content-drawer > summary b { min-width: 0; margin-right: auto; overflow-wrap: anywhere; font-weight: 650; }
-.ocs-content-drawer > summary small { margin-left: 0; opacity: .62; font-size: .86em; font-weight: 400; white-space: nowrap; }
-.ocs-content-drawer-body { display: grid; gap: 7px; margin: 3px 0 2px 4px; padding: 1px 0 2px 8px; }
+/* `flex: 0 0 auto` matters: the row is a flex line and the heading beside it
+   carries `margin-right: auto`, so without it this shrinks along with the
+   heading and its own `nowrap` text gets clipped instead of wrapping. */
+.ocs-content-drawer > summary small { flex: 0 0 auto; margin-left: 0; opacity: .62; font-size: .86em; font-weight: 400; white-space: nowrap; }
+/* Every one of these is a single-column grid holding names of arbitrary
+   length. Without an explicit `minmax(0, 1fr)` the implicit track is sized to
+   max-content, so one long entry widens the column past the popup and clips
+   whatever sits to its right -- counts, chevrons, the lot. */
+.ocs-content-drawer-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; margin: 3px 0 2px 4px; padding: 1px 0 2px 8px; }
 .ocs-content-section { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--SmartThemeBorderColor, #777); }
 .ocs-content-section > summary { font-size: 1.02em; }
 .ocs-content-section > .ocs-content-drawer-body { border-left: 2px solid currentColor; }
@@ -210,6 +345,10 @@
 .ocs-content-preset > .ocs-content-drawer-body { margin: 3px 0 2px; padding: 1px 0 2px 4px; border-left: 0; }
 .ocs-content-preset > summary small,
 .ocs-content-api > summary small { color: inherit; opacity: 1; font-size: 1em; font-weight: 400; }
+/* The entry list carries its own left rule, and these drawer bodies already
+   draw one -- nested, that reads as two parallel lines. */
+.ocs-content-preset-section .ocs-world-entries,
+.ocs-content-regex-source .ocs-world-entries { margin-left: 0; padding-left: 0; border-left: 0; }
 .ocs-content-preset-section { margin: 2px 0 4px; }
 .ocs-content-preset-section > summary { display: flex; align-items: baseline; gap: 8px; min-height: 30px; padding: 0 1px; }
 .ocs-content-preset-section > summary b { font-size: .96em; font-weight: 650; }
@@ -219,7 +358,7 @@
 .ocs-content-source-title { display: flex; align-items: baseline; gap: 8px; min-height: 30px; padding: 0 3px; }
 .ocs-content-source-title b { font-size: .96em; font-weight: 650; }
 .ocs-content-source-title small { margin-left: auto; opacity: .62; font-size: .84em; white-space: nowrap; }
-.ocs-content-source-body { display: grid; gap: 6px; }
+.ocs-content-source-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .ocs-content-source[open] > .ocs-content-drawer-body { margin: 3px 0 2px 4px; padding: 1px 0 2px 8px; border-left: 2px solid currentColor; }
 .ocs-content-group { margin: 0; }
 .ocs-content-group > summary { background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 19%, transparent); }
@@ -232,7 +371,7 @@
 .ocs-content-entry-group > summary b { font-size: .95em; font-weight: 600; }
 .ocs-content-meta,
 .ocs-content-value { margin: 1px 0 3px; opacity: .7; font-size: .92em; }
-.ocs-content-items { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; font-size: .96em; line-height: 1.42; }
+.ocs-content-items { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; margin: 0; padding: 0; list-style: none; font-size: .96em; line-height: 1.42; }
 .ocs-content-items li { min-width: 0; padding: 4px 7px; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ocs-content-items .ocs-content-empty { opacity: .65; font-style: italic; }
 
@@ -344,9 +483,64 @@
    The row then reads as the usual gap with a line drawn through it, rather
    than as an extra block of whitespace. */
 #user_avatar_block .ocs-persona-current-sep { flex: 0 0 100%; height: 0; margin: 1px 0; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 28%, transparent); }
-#ocs_persona_folders:empty { display: none; }
-#ocs_persona_folders { display: flex; flex-direction: column; gap: 5px; margin-bottom: 5px; }
-#ocs_persona_folders .bogus_folder_select { cursor: pointer; }
+/* Folders live inside `#user_avatar_block` so they share its wrapping row with
+   the cards, exactly as the character list does. Only what the stock rules do
+   not already cover is stated here. */
+#user_avatar_block .bogus_folder_select { cursor: pointer; }
+
+/* Grid view. SillyTavern's `#user_avatar_block.gridView` rules only name
+   `.avatar-container`, so a folder in the same block still needs the treatment
+   `body.charListGrid` gives `.bogus_folder_select` in the character list. */
+#user_avatar_block.gridView .bogus_folder_select {
+    width: 30%;
+    max-width: 100px;
+    height: min-content;
+    flex-direction: column;
+    align-items: flex-start;
+    overflow: hidden;
+}
+#user_avatar_block.gridView .bogus_folder_select :is(.ch_name, .bogus_folder_counter) {
+    width: 100%;
+    max-width: 100px;
+    text-align: center;
+    font-size: calc(var(--mainFontSize) * .8);
+}
+/* The template wraps the name and the counter in a row that is
+   `wide100pLess70px` -- sized to sit beside the avatar in list view. In a grid
+   the avatar is above it, so that row has to become a full-width column; left
+   as it was, the CJK counter is squeezed into a one-character column and reads
+   vertically. */
+#user_avatar_block.gridView .bogus_folder_select .character_select_container {
+    width: 100%;
+    max-width: 100px;
+    justify-content: center;
+}
+#user_avatar_block.gridView .bogus_folder_select .character_name_block {
+    width: 100%;
+    flex-direction: column;
+}
+/* The member avatar strip belongs to the list layout; the character grid drops
+   the equivalent block too. */
+#user_avatar_block.gridView .bogus_folder_select .bogus_folder_avatars_block {
+    display: none;
+}
+/* Persona avatars are centred in their card (`.avatar-container .avatar` sets
+   `align-self: center`); the folder icon has no such rule and sat left, so the
+   two never lined up. */
+#user_avatar_block.gridView .bogus_folder_select > .avatar {
+    align-self: center;
+}
+/* The back tile carries two icons: a narrow inline placeholder for list view
+   and a full-size `.avatar` for the grid. Stock hides the latter with
+   `.bogus_folder_select_back .avatar { display: none !important }`, so swapping
+   them needs `!important` and more than two classes to outrank it. */
+#user_avatar_block.gridView .bogus_folder_select_back .bogus_folder_back_placeholder {
+    display: none !important;
+}
+#user_avatar_block.gridView .bogus_folder_select_back .avatar {
+    display: flex !important;
+    align-self: center;
+}
 
 #ocs_persona_tags { margin-bottom: 5px; }
 #ocs_persona_tag_list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
@@ -387,6 +581,12 @@
     border-radius: inherit;
     pointer-events: none;
 }
+/* `inherit` covers the round default, but the avatar-shape settings put their
+   radius on `.avatar` with `!important` from a body class, and a theme may set
+   it somewhere the pseudo-element does not follow. Stating the two non-round
+   shapes explicitly keeps the ring the same shape as the avatar it draws on. */
+body.square-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after { border-radius: var(--avatar-base-border-radius); }
+body.rounded-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after { border-radius: var(--avatar-base-border-radius-rounded); }
 
 /* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
    a flat grey wash over every card, the theme quote color for the selected
@@ -394,8 +594,7 @@
 #user_avatar_block.ocs-persona-bulk-mode .avatar-container { cursor: pointer; background-color: rgba(170, 170, 170, .15); transition: background-color var(--animation-duration-3x, .3s) ease; }
 #user_avatar_block.ocs-persona-bulk-mode .avatar-container.ocs-persona-selected { background-color: var(--SmartThemeQuoteColor); }
 #user_avatar_block.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
-#ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select { cursor: auto; filter: saturate(.3); }
-#ocs_persona_folders.ocs-persona-bulk-mode .bogus_folder_select:hover { background: none; }
+#user_avatar_block.ocs-persona-bulk-mode .bogus_folder_select:hover { background: none; }
 
 .ocs-persona-bulk-tags { width: min(720px, 100%); text-align: left; }
 .ocs-persona-bulk-tag-list { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -540,14 +739,12 @@
 .ocs-info:focus-visible { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 2px; opacity: 1; }
 .ocs-info-body { text-align: left; line-height: 1.65; white-space: pre-line; }
 
-/* Track and thumb, sized off the font so it scales with the user's theme. */
-.ocs-switch { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; }
+/* Sized off the font so it scales with the user's theme. The input covers the
+   control and stays invisible: it remains the thing that is clicked and
+   focused, while the icon beside it is what is seen. */
+.ocs-switch { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; font-size: 1.24em; }
 .ocs-switch input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.ocs-switch-track { display: block; width: 2em; height: 1.1em; padding: 2px; border: 1px solid var(--ocs-line); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 8%, transparent); transition: background var(--animation-duration, .18s) ease, border-color var(--animation-duration, .18s) ease; }
-.ocs-switch-thumb { display: block; width: calc(1.1em - 4px); height: calc(1.1em - 4px); border-radius: 50%; background: color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 45%, transparent); transition: transform var(--animation-duration, .18s) ease, background var(--animation-duration, .18s) ease; }
-.ocs-switch input:checked ~ .ocs-switch-track { border-color: var(--SmartThemeQuoteColor); background: color-mix(in srgb, var(--SmartThemeQuoteColor) 30%, transparent); }
-.ocs-switch input:checked ~ .ocs-switch-track .ocs-switch-thumb { background: var(--SmartThemeQuoteColor); transform: translateX(0.9em); }
-.ocs-switch input:focus-visible ~ .ocs-switch-track { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 2px; }
+.ocs-switch:focus-within { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 2px; border-radius: 4px; }
 
 /* Sub-settings exist only while the parent is on; collapsed they take no room
    at all, so an unused feature is a single line.

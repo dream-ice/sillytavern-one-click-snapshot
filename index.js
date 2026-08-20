@@ -698,6 +698,79 @@ function presetGroupMapFromEntryGrouping(state, settings) {
     return result;
 }
 
+/**
+ * The raw grouping state, from wherever the active provider keeps it.
+ *
+ * Split out from `getPresetPromptGroups` because the group switches live on
+ * this object and are lost once it has been flattened to a name lookup.
+ *
+ * @param {object} settings Chat completion settings
+ * @param {object} [preset] Preset object, when reading one that is not loaded
+ * @returns {object|null}
+ */
+function presetPromptGroupState(settings, preset = null) {
+    const provider = presetGroupingProvider();
+    if (!provider) return null;
+
+    // BaiBai does not read the stored copy at runtime. It clones it once per
+    // preset into `presetPromptGroupRuntimeState` and works from that, syncing
+    // back only on its own save -- so a write to the stored copy is invisible
+    // to it and is then overwritten. Its extension object is that same state
+    // container, which is what makes the live copy reachable from here.
+    if (provider === 'baibai' && !preset) {
+        const runtime = globalThis.__baiBaiToolkitExtensionInstalled?.presetPromptGroupRuntimeState;
+        if (hasUsablePresetGroupState(runtime)) return runtime;
+    }
+
+    const extensions = settings?.extensions ?? {};
+    const presetExtensions = preset?.extensions ?? {};
+    const states = provider === 'baibai'
+        ? [presetExtensions?.baibaiToolkit?.presetPromptGroups, extensions?.baibaiToolkit?.presetPromptGroups]
+        : [
+            extensions?.presetTransfer?.presetPromptGroups,
+            extensions?.['preset-transfer']?.presetPromptGroups,
+            presetExtensions?.presetTransfer?.presetPromptGroups,
+            presetExtensions?.['preset-transfer']?.presetPromptGroups,
+        ];
+    return states.find(hasUsablePresetGroupState) ?? states.find(Boolean) ?? null;
+}
+
+/**
+ * The prompt groups and their global switches.
+ *
+ * That switch is an overlay, exactly like the worldbook one: toggling it writes
+ * `group.enabled` and leaves each prompt's own flag untouched, with the
+ * effective state worked out as `item.enabled && group.enabled` at send time.
+ * A snapshot has to record both to be able to reproduce what was in effect.
+ *
+ * @param {object} settings Chat completion settings
+ * @param {object} [preset] Preset object, when reading one that is not loaded
+ * @returns {{id: string, name: string, enabled: boolean, identifiers: string[]}[]}
+ */
+function presetPromptGroupGates(settings, preset = null) {
+    const state = presetPromptGroupState(settings, preset);
+    if (!state) return [];
+
+    const members = new Map();
+    for (const [identifier, meta] of Object.entries(state.prompts ?? state.entries ?? {})) {
+        const groupId = String(meta?.groupId ?? meta?.group ?? meta ?? '');
+        if (!groupId) continue;
+        if (!members.has(groupId)) members.set(groupId, []);
+        members.get(groupId).push(String(identifier));
+    }
+
+    return (state.groups ?? []).map((group, index) => {
+        const id = String(group?.id ?? index);
+        const listed = (group?.entries ?? group?.members ?? group?.items ?? []).map(String);
+        return {
+            id,
+            name: group?.name || group?.title || '未命名分组',
+            enabled: group?.enabled !== false,
+            identifiers: members.get(id) ?? listed,
+        };
+    }).filter(group => group.identifiers.length);
+}
+
 function getPresetPromptGroups(settings, preset = null) {
     const provider = presetGroupingProvider();
     if (!provider) return new Map();
@@ -728,33 +801,51 @@ function getPresetPromptGroups(settings, preset = null) {
     return presetGroupMapFromEntryGrouping(presetExtensions?.entryGrouping ?? extensions?.entryGrouping, settings);
 }
 
+/**
+ * Reads one lorebook into the shape a snapshot stores.
+ *
+ * The read is by name and goes straight to the file, so it neither depends on
+ * nor disturbs what is currently mounted. That is what lets a snapshot record
+ * a book the user is not playing with right now.
+ *
+ * @param {{name: string, sources: string[]}} descriptor Book name and the slots it occupies
+ * @param {Map<string, string>} [groups] Preset-transfer book groups, read once per batch
+ * @returns {Promise<object|null>} The stored book, or null when the book cannot be read
+ */
+async function captureWorldBook(descriptor, groups = null) {
+    const data = await loadWorldInfo(descriptor.name);
+    if (!data?.entries) return null;
+
+    const bookGroups = groups ?? getPresetTransferWorldbookGroups();
+    const entries = Object.entries(data.entries)
+        .sort(([, a], [, b]) => Number(a?.displayIndex ?? 0) - Number(b?.displayIndex ?? 0));
+    const ptGroups = getPresetTransferWorldbookEntryGroups(descriptor.name, entries.map(([uid]) => uid), data);
+    const ptGates = getPresetTransferWorldbookEntryGates(descriptor.name, entries.map(([uid]) => uid), data);
+    const gatedOffUids = new Set(ptGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
+    return {
+        ...descriptor,
+        group: bookGroups.get(descriptor.name) ?? '',
+        ptGates,
+        entries: entries.map(([uid, entry]) => ({
+            uid: String(uid),
+            label: entryLabel(entry, uid),
+            // PT's group switch is an overlay, not entry.disable. Record
+            // the effective state users see, while retaining raw state for
+            // a lossless restore of a group that is currently gated off.
+            enabled: !entry.disable && !gatedOffUids.has(String(uid)),
+            rawEnabled: !entry.disable,
+            group: String(entry.group ?? '').trim(),
+            ptGroup: ptGroups.get(String(uid)) ?? '',
+        })),
+    };
+}
+
 async function captureWorldInfo(includedSources) {
     const books = [];
     const groups = getPresetTransferWorldbookGroups();
     for (const descriptor of worldBookDescriptors(includedSources)) {
-        const data = await loadWorldInfo(descriptor.name);
-        if (!data?.entries) continue;
-        const entries = Object.entries(data.entries)
-            .sort(([, a], [, b]) => Number(a?.displayIndex ?? 0) - Number(b?.displayIndex ?? 0));
-        const ptGroups = getPresetTransferWorldbookEntryGroups(descriptor.name, entries.map(([uid]) => uid), data);
-        const ptGates = getPresetTransferWorldbookEntryGates(descriptor.name, entries.map(([uid]) => uid), data);
-        const gatedOffUids = new Set(ptGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
-        books.push({
-            ...descriptor,
-            group: groups.get(descriptor.name) ?? '',
-            ptGates,
-            entries: entries.map(([uid, entry]) => ({
-                uid: String(uid),
-                label: entryLabel(entry, uid),
-                // PT's group switch is an overlay, not entry.disable. Record
-                // the effective state users see, while retaining raw state for
-                // a lossless restore of a group that is currently gated off.
-                enabled: !entry.disable && !gatedOffUids.has(String(uid)),
-                rawEnabled: !entry.disable,
-                group: String(entry.group ?? '').trim(),
-                ptGroup: ptGroups.get(String(uid)) ?? '',
-            })),
-        });
+        const book = await captureWorldBook(descriptor, groups);
+        if (book) books.push(book);
     }
     return {
         // Only the global selector is a mount state. Character, user and chat
@@ -778,11 +869,19 @@ function capturePreset() {
     const selectedName = manager?.getSelectedPresetName?.();
     const selectedPreset = manager?.getCompletionPresetByName?.(selectedName);
     const groups = getPresetPromptGroups(oai, selectedPreset);
+    // No preset argument on purpose: the gate to record is the one in effect
+    // right now, which lives in the provider's live state rather than in the
+    // copy saved inside the preset file.
+    const promptGates = main_api === 'openai' ? presetPromptGroupGates(oai) : [];
+    const gatedOff = new Set(promptGates.filter(gate => !gate.enabled).flatMap(gate => gate.identifiers));
     const promptEntries = main_api === 'openai'
         ? (oai?.prompt_order ?? []).flatMap(list => (list.order ?? []).map(item => ({
             identifier: item.identifier,
             label: prompts.get(item.identifier) ?? item.identifier,
-            enabled: !!item.enabled,
+            // The group switch is an overlay, so record the state actually in
+            // effect while keeping the raw flag for a lossless restore.
+            enabled: !!item.enabled && !gatedOff.has(String(item.identifier)),
+            rawEnabled: !!item.enabled,
             group: groups.get(item.identifier) ?? '',
         })))
         : [];
@@ -798,6 +897,7 @@ function capturePreset() {
         // applying it later uses the preset's current text and only restores
         // the enabled state recorded here.
         promptEntries,
+        promptGates,
         // Chat-completion presets serve Gemini, Claude and other compatible
         // backends. Store their generation controls separately from prompt
         // content, so a snapshot can restore e.g. a Gemini temperature of
@@ -816,6 +916,26 @@ function capturePresetParameters() {
         if (setting && Object.hasOwn(settings, setting)) parameters[key] = deepClone(settings[setting]);
     }
     return parameters;
+}
+
+/**
+ * The generation parameters stored inside an arbitrary preset object.
+ *
+ * `capturePresetParameters` reads the live settings; this reads a preset that
+ * was never loaded, which is what lets a snapshot be pointed at a different
+ * preset without the user having to switch to it first.
+ *
+ * @param {object} preset Preset object from the preset manager
+ * @returns {object|null} Parameters, or null when the preset carries none
+ */
+function presetParametersOf(preset) {
+    if (!preset || typeof preset !== 'object') return null;
+    const parameters = {};
+    for (const key of PRESET_PARAMETER_KEYS) {
+        const setting = settingsToUpdate[key]?.[1];
+        if (setting && Object.hasOwn(preset, setting)) parameters[key] = deepClone(preset[setting]);
+    }
+    return Object.keys(parameters).length ? parameters : null;
 }
 
 function presetParametersEqual(first, second) {
@@ -1210,6 +1330,91 @@ function installThemeRenameObserver() {
     themeOptionObserver.observe(select, { subtree: true, childList: true, attributes: true, attributeFilter: ['value'] });
 }
 
+/**
+ * The key BaiBai files a regex scope's grouping under.
+ *
+ * It keeps one grouping per scope rather than one for everything, so the
+ * global list, each character's local rules and each preset's rules all have
+ * their own -- reading the wrong key silently yields no groups at all.
+ *
+ * @param {string} sourceKey One of `global`, `scoped`, `preset`
+ * @param {object} context The snapshot's recorded regex context
+ * @returns {string}
+ */
+function regexGroupScopeKey(sourceKey, context = {}) {
+    if (sourceKey === 'scoped') return `scoped:${context.characterAvatar || 'none'}`;
+    if (sourceKey === 'preset') return `preset:${context.presetApi || getCurrentPresetAPI()}:${context.presetName || ''}`;
+    return 'global';
+}
+
+/**
+ * Regex script grouping, from whichever provider is installed.
+ *
+ * BaiBai stores `scopes[key] = {groups: [{id, name}], scripts: {id: {groupId}}}`
+ * under `extension_settings.baiBaiToolkit.regexListGroups`; PT stores one flat
+ * list whose groups carry a `scope` of `global` / `scoped` / `preset`. Neither
+ * group has an `enabled` flag, unlike their worldbook and preset groups, so
+ * this is a display grouping with no switch behind it to reproduce on apply.
+ *
+ * @param {string} sourceKey One of `global`, `scoped`, `preset`
+ * @param {object} context The snapshot's recorded regex context
+ * @returns {Map<string, string>} Script id to group name
+ */
+function regexGroupMap(sourceKey, context = {}) {
+    const result = new Map();
+
+    // Note the casing: this is `baiBaiToolkit` in the extension settings, while
+    // the copy saved into a preset is `baibaiToolkit`.
+    const state = extension_settings?.baiBaiToolkit?.regexListGroups?.scopes?.[regexGroupScopeKey(sourceKey, context)];
+    if (state) {
+        const names = new Map((state.groups ?? []).map(group => [String(group?.id ?? ''), group?.name || '未命名分组']));
+        for (const [id, meta] of Object.entries(state.scripts ?? {})) {
+            const name = names.get(String(meta?.groupId ?? ''));
+            if (name) result.set(String(id), name);
+        }
+        if (result.size) return result;
+    }
+
+    const groupings = extension_settings?.presetTransfer?.regexScriptGroupings
+        ?? extension_settings?.['preset-transfer']?.regexScriptGroupings;
+    for (const group of groupings?.groups ?? []) {
+        if (group?.scope && group.scope !== sourceKey) continue;
+        for (const id of group?.memberIds ?? group?.members ?? group?.entries ?? []) {
+            result.set(String(id), group?.name || '未命名分组');
+        }
+    }
+    return result;
+}
+
+/**
+ * The regex scripts belonging to a character or a preset that is not loaded.
+ *
+ * Both live in data the browser already has -- the character card and the
+ * preset object -- so a snapshot can be built for a character or preset the
+ * user is not currently using. Applying it stays gated on actually being there,
+ * which `applyRegex` already checks.
+ *
+ * @param {string} type One of SCRIPT_TYPES
+ * @param {string} owner Character avatar, or preset name
+ * @returns {{id: string, scriptName?: string}[]}
+ */
+function regexScriptsOf(type, owner) {
+    if (type === SCRIPT_TYPES.SCOPED) {
+        const character = (characters ?? []).find(item => item.avatar === owner);
+        const scripts = character?.data?.extensions?.regex_scripts;
+        return Array.isArray(scripts) ? scripts : [];
+    }
+    if (type === SCRIPT_TYPES.PRESET) {
+        const preset = getPresetManager()?.getCompletionPresetByName?.(owner);
+        const scripts = preset?.extensions?.regex_scripts;
+        return Array.isArray(scripts) ? scripts : [];
+    }
+    return getScriptsByType(type);
+}
+
+/** The three regex source keys, paired with the script type each reads. */
+const REGEX_SCOPE_TYPES = [['global', SCRIPT_TYPES.GLOBAL], ['scoped', SCRIPT_TYPES.SCOPED], ['preset', SCRIPT_TYPES.PRESET]];
+
 function captureRegexSource(type) {
     return {
         scripts: getScriptsByType(type).map(script => ({
@@ -1484,31 +1689,48 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
         const savedGates = Array.isArray(book.ptGates) ? book.ptGates : [];
         const currentGates = getPresetTransferWorldbookEntryGates(book.name, orderedUids, data);
         const protectedUids = new Set(currentGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
-        const gatedOffBySnapshot = new Set();
+        // What the snapshot says should actually be in effect. A group gate is
+        // derived from this rather than restored from the recorded gate state:
+        // the snapshot stores the effective switches, so a group holding
+        // anything that must be on has to be gated on for that to be reachable.
+        const wantedUids = new Set((book.entries ?? []).filter(entry => entry.enabled).map(entry => String(entry.uid)));
 
-        if (savedGates.length) {
-            const ptSetGate = window.PT_setWorldbookGroupGate;
-            if (typeof ptSetGate === 'function') {
+        // Stock preset-transfer groups worldbook entries but has no group
+        // switch, so every gate reads as open and there is nothing to
+        // reproduce. Engaging this path there would warn about a feature that
+        // build does not have and skip every grouped entry, which is most of
+        // them. Only a build that actually has the switch -- or a library that
+        // already has one closed -- gets the gate treatment.
+        const ptSetGate = window.PT_setWorldbookGroupGate;
+        const hasGateControl = typeof ptSetGate === 'function';
+        const hasClosedGate = savedGates.some(gate => !gate.enabled) || currentGates.some(gate => !gate.enabled);
+
+        if (savedGates.length && (hasGateControl || hasClosedGate)) {
+            if (hasGateControl) {
                 for (const gate of savedGates) {
                     const members = gate.uids.filter(uid => orderedUids.includes(String(uid))).map(String);
                     if (!members.length) continue;
-                    const ok = await ptSetGate(book.name, gate.id, !gate.enabled, members, orderedUids);
-                    if (ok) {
-                        members.forEach(uid => protectedUids.delete(uid));
-                        if (!gate.enabled) members.forEach(uid => gatedOffBySnapshot.add(uid));
-                    }
-                    if (!ok) members.forEach(uid => protectedUids.add(uid));
+                    const wanted = members.some(uid => wantedUids.has(uid));
+                    const ok = await ptSetGate(book.name, gate.id, !wanted, members, orderedUids);
+                    // A group the snapshot leaves entirely off is gated off and
+                    // then left alone: the snapshot only says it should not be
+                    // in effect, which the closed gate already achieves, and
+                    // rewriting the switches underneath would throw away a
+                    // grouping the user set up for their own reasons.
+                    if (ok && wanted) members.forEach(uid => protectedUids.delete(uid));
+                    else members.forEach(uid => protectedUids.add(uid));
                 }
                 // PT's own setter persists grouping metadata. Reload the file
                 // before touching individual entry switches so we never write
                 // a stale, grouping-less object back over it.
                 data = await loadWorldInfo(book.name);
             } else {
-                // If PT is absent/not ready, leave all grouped entries alone.
-                // Preserving the user's group gate is safer than flattening it.
-                savedGates.flatMap(gate => gate.uids).forEach(uid => protectedUids.add(String(uid)));
+                // A closed gate exists but the setter is not there to move it.
+                // Those groups are left exactly as they are: preserving a gate
+                // the user set is safer than flattening it. Only the affected
+                // groups are skipped, never every grouped entry.
                 if (!warnedAboutPtGate) {
-                    toastr.warning('预设转移的世界书分组尚未就绪，已跳过相关条目以保护分组状态。', '一键快照');
+                    toastr.warning('预设转移的分组开关尚未就绪，已跳过被关闭的分组以保护它们的状态。', '一键快照');
                     warnedAboutPtGate = true;
                 }
             }
@@ -1521,9 +1743,7 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
             // A closed PT gate already controls effective enablement. Restore
             // the underlying per-entry state without turning that group into
             // a pile of permanently disabled entries.
-            const desiredEnabled = gatedOffBySnapshot.has(String(saved.uid))
-                ? (saved.rawEnabled ?? !entry.disable)
-                : saved.enabled;
+            const desiredEnabled = saved.enabled;
             if (!!entry.disable === !!desiredEnabled) {
                 entry.disable = !desiredEnabled;
                 changed = true;
@@ -1595,10 +1815,40 @@ async function applyPreset(state) {
         // renamed or edited entries retain their current content. Reloading
         // the same preset is still avoided above.
         const enabledByIdentifier = new Map(savedPromptEntries.map(entry => [entry.identifier, !!entry.enabled]));
+
+        // Group switches are derived rather than restored, for the same reason
+        // as the worldbook ones: the snapshot records what was in effect, so a
+        // group holding anything that must be on has to be switched on for that
+        // to be reachable. A group the snapshot leaves entirely off is switched
+        // off and its own entries are left exactly as the user arranged them --
+        // the closed switch already achieves what the snapshot asked for.
+        const skipped = new Set();
+        let gateChanged = false;
+        const liveGroupState = presetPromptGroupState(context.chatCompletionSettings);
+        // Only when the provider's groups already carry the switch. A build
+        // that merely groups prompts has no such concept, and writing the flag
+        // in would put a field it never asked for into its own settings.
+        const hasGroupSwitch = (liveGroupState?.groups ?? []).some(group => typeof group?.enabled === 'boolean');
+        if (liveGroupState && hasGroupSwitch && Array.isArray(state.promptGates)) {
+            // The stored copy is written too, so the choice survives the next
+            // time the provider reloads its runtime state from disk.
+            const storedGroups = context.chatCompletionSettings?.extensions?.baibaiToolkit?.presetPromptGroups?.groups;
+            for (const gate of presetPromptGroupGates(context.chatCompletionSettings)) {
+                const wanted = gate.identifiers.some(identifier => enabledByIdentifier.get(identifier) === true);
+                for (const groups of [liveGroupState.groups, storedGroups]) {
+                    const group = (groups ?? []).find(item => String(item?.id ?? '') === gate.id);
+                    if (!group || group.enabled === wanted) continue;
+                    group.enabled = wanted;
+                    gateChanged = true;
+                }
+                if (!wanted) gate.identifiers.forEach(identifier => skipped.add(identifier));
+            }
+        }
+
         let changed = false;
         for (const list of context.chatCompletionSettings.prompt_order ?? []) {
             for (const item of list.order ?? []) {
-                if (!enabledByIdentifier.has(item.identifier)) continue;
+                if (!enabledByIdentifier.has(item.identifier) || skipped.has(String(item.identifier))) continue;
                 const enabled = enabledByIdentifier.get(item.identifier);
                 if (!!item.enabled !== enabled) {
                     item.enabled = enabled;
@@ -1606,7 +1856,9 @@ async function applyPreset(state) {
                 }
             }
         }
-        if (changed) {
+        // The gate alone counts as a change: the prompt manager has to redraw
+        // for a group that just closed to stop showing as active.
+        if (changed || gateChanged) {
             saveSettingsDebounced();
             await eventSource.emit(event_types.OAI_PRESET_CHANGED_AFTER);
         }
@@ -1647,6 +1899,62 @@ function validateSnapshotVersionScopes(scopes) {
  * @param {'character'|'persona'} type Version type
  * @returns {boolean} Whether a version was created
  */
+/**
+ * Builds an "初始版本" for a character or user that has none yet.
+ *
+ * Unlike `ensureVersionForSnapshot` this works on any avatar, not just the one
+ * currently open: the content editor lets a snapshot be pointed at somebody
+ * else, and that somebody may never have had a version made for them.
+ *
+ * @param {'character'|'persona'} type Which library to add to
+ * @param {string} avatar Owner avatar
+ * @returns {{id: string, name: string}|null} The new version, or null
+ */
+function createInitialVersionFor(type, avatar) {
+    if (!avatar) return null;
+
+    let state = null;
+    if (type === 'character') {
+        const character = (characters ?? []).find(item => item.avatar === avatar);
+        if (!character) return null;
+        const data = deepClone(character.data ?? {});
+        // Same exclusions as a normal capture: scoped regex, the greeting
+        // catalog and our own metadata are card-level resources, not version
+        // content, and a version must never freeze a copy of them.
+        if (data.extensions) delete data.extensions.regex_scripts;
+        delete data.alternate_greetings;
+        delete data.extensions?.one_click_snapshot;
+        state = {
+            avatar,
+            name: character.name,
+            description: character.description ?? '',
+            personality: character.personality ?? '',
+            scenario: character.scenario ?? '',
+            mes_example: character.mes_example ?? '',
+            talkativeness: character.talkativeness,
+            data,
+        };
+    } else {
+        if (!power_user.personas?.[avatar]) return null;
+        state = {
+            avatar,
+            name: String(power_user.personas[avatar] ?? ''),
+            descriptor: deepClone(power_user.persona_descriptions?.[avatar] ?? {}),
+        };
+    }
+
+    const store = type === 'character' ? settings().characterVersions : settings().personaVersions;
+    store[avatar] ??= [];
+    const version = { id: makeId(), createdAt: Date.now(), updatedAt: Date.now(), name: '初始版本', data: state, group: '' };
+    store[avatar].push(version);
+    // Only made active when this is the owner currently open; pointing the live
+    // selection at somebody else's version would be nonsense.
+    const active = type === 'character' ? settings().activeCharacterVersions : settings().activePersonaVersions;
+    const openAvatar = type === 'character' ? currentCharacter()?.avatar : user_avatar;
+    if (openAvatar === avatar) active[avatar] = version.id;
+    return version;
+}
+
 function ensureVersionForSnapshot(type) {
     if (!feature('version.autoInitial')) return false;
     const existing = type === 'character' ? currentCharacterVersion() : currentPersonaVersion();
@@ -2088,14 +2396,46 @@ function snapshotRequirements(snapshot) {
     const hasScopedRegex = Boolean(payload.regex?.sources?.scoped);
     const needsCharacter = Boolean(snapshot?.scopes?.character || sources.has('角色主世界书') || sources.has('角色附加世界书') || hasScopedRegex);
     const needsPersona = Boolean(snapshot?.scopes?.persona || sources.has('用户绑定世界书'));
+
+    // Whose books these are, worked out from the books themselves rather than
+    // from the context recorded at capture time. A snapshot assembled by hand
+    // can hold a character's lorebook without ever having been taken while
+    // that character was open, and the recorded context would then name the
+    // wrong one -- silently passing a check that should have stopped it.
+    const ownerFromBooks = (slots, ownersOf) => {
+        for (const book of payload.worldInfo?.books ?? []) {
+            if (!(book.sources ?? []).some(source => slots.has(source))) continue;
+            const owners = ownersOf(book.name);
+            // Only an unambiguous owner counts: a file shared by two characters
+            // says nothing about which one this snapshot is for.
+            if (owners.size === 1) return [...owners][0];
+        }
+        return null;
+    };
+    const bookCharacter = needsCharacter ? ownerFromBooks(CHARACTER_WORLD_SLOTS, characterOwnersOfBook) : null;
+    const bookPersona = needsPersona ? ownerFromBooks(PERSONA_WORLD_SLOTS, personaOwnersOfBook) : null;
+
+    const characterAvatar = payload.character?.data?.avatar
+        ?? bookCharacter
+        ?? (needsCharacter ? context.characterAvatar ?? regexContext.characterAvatar ?? null : null);
+    const personaAvatar = payload.persona?.data?.avatar
+        ?? bookPersona
+        ?? (needsPersona ? context.personaAvatar ?? null : null);
+
     return {
         needsCharacter,
         needsPersona,
         hasChatWorldbook: sources.has('聊天世界书'),
-        characterAvatar: payload.character?.data?.avatar ?? (needsCharacter ? context.characterAvatar ?? regexContext.characterAvatar ?? null : null),
-        characterName: payload.character?.data?.name ?? payload.character?.versionName ?? '该快照中的角色',
-        personaAvatar: payload.persona?.data?.avatar ?? (needsPersona ? context.personaAvatar ?? null : null),
-        personaName: payload.persona?.data?.name ?? payload.persona?.versionName ?? '该快照中的用户',
+        characterAvatar,
+        characterName: payload.character?.data?.name
+            ?? payload.character?.versionName
+            ?? (characterAvatar ? (characters ?? []).find(item => item.avatar === characterAvatar)?.name : null)
+            ?? '该快照中的角色',
+        personaAvatar,
+        personaName: payload.persona?.data?.name
+            ?? payload.persona?.versionName
+            ?? (personaAvatar ? String(power_user.personas?.[personaAvatar] ?? '') : null)
+            ?? '该快照中的用户',
         chatId: context.chatId ? String(context.chatId) : null,
     };
 }
@@ -4309,6 +4649,539 @@ async function configureSnapshotScopeSources(state, key) {
     return true;
 }
 
+/** The slots a lorebook can occupy in a snapshot, in display order. */
+const WORLD_SLOT_ORDER = Object.values(WORLD_SOURCE_LABELS);
+
+/** Slot label back to the `worldSources` key that controls whether it is recorded. */
+const WORLD_SLOT_KEYS = Object.fromEntries(Object.entries(WORLD_SOURCE_LABELS).map(([key, label]) => [label, key]));
+
+/** Slots whose book belongs to a character, and to a persona. */
+const CHARACTER_WORLD_SLOTS = new Set(['角色主世界书', '角色附加世界书']);
+const PERSONA_WORLD_SLOTS = new Set(['用户绑定世界书']);
+
+/**
+ * The characters a book is bound to, as main or extra lorebook.
+ *
+ * A set rather than one owner: the same file can legitimately be several
+ * characters' lorebook, and treating that as "unknown owner" would refuse
+ * combinations that are perfectly consistent.
+ *
+ * @param {string} name Book name
+ * @returns {Set<string>} Character avatars
+ */
+function characterOwnersOfBook(name) {
+    const owners = new Set();
+    if (!name) return owners;
+    const charLore = getWorldInfoSettings().world_info?.charLore ?? [];
+    for (const character of characters ?? []) {
+        if (String(character?.data?.extensions?.world ?? '') === name) owners.add(character.avatar);
+        const file = getCharaFilename(null, { manualAvatarKey: character.avatar });
+        if ((charLore.find(item => item.name === file)?.extraBooks ?? []).includes(name)) owners.add(character.avatar);
+    }
+    return owners;
+}
+
+/**
+ * The personas a book is bound to.
+ * @param {string} name Book name
+ * @returns {Set<string>} Persona avatars
+ */
+function personaOwnersOfBook(name) {
+    const owners = new Set();
+    if (!name) return owners;
+    for (const [avatar, descriptor] of Object.entries(power_user.persona_descriptions ?? {})) {
+        if (String(descriptor?.lorebook ?? '') === name) owners.add(avatar);
+    }
+    return owners;
+}
+
+/**
+ * Why a book cannot join this snapshot, or null when it can.
+ *
+ * A snapshot describes one character playing as one user, so it cannot hold
+ * two lorebooks that belong to different characters -- applying it would ask
+ * for two conflicting bindings at once. Books are only compared when both
+ * sides have a known owner, so an unowned or shared file never blocks.
+ *
+ * @param {object} state The snapshot's world payload
+ * @param {string} name Book being added
+ * @param {string} slot Slot it would occupy
+ * @returns {string|null} Message to show, or null when there is no conflict
+ */
+function worldOwnerConflict(state, name, slot) {
+    const compare = (slots, ownersOf, subject) => {
+        if (!slots.has(slot)) return null;
+        const mine = ownersOf(name);
+        if (!mine.size) return null;
+        for (const book of state.books ?? []) {
+            if (!(book.sources ?? []).some(source => slots.has(source))) continue;
+            const theirs = ownersOf(book.name);
+            if (!theirs.size || [...mine].some(avatar => theirs.has(avatar))) continue;
+            return `这个快照已经记录了「${book.name}」，它属于另一个${subject}。一个快照只能记录一个${subject}的世界书。`;
+        }
+        return null;
+    };
+    return compare(CHARACTER_WORLD_SLOTS, characterOwnersOfBook, '角色')
+        ?? compare(PERSONA_WORLD_SLOTS, personaOwnersOfBook, '用户');
+}
+
+/** Chat lorebook bindings, keyed by character avatar. */
+
+/** Every chat's lorebook binding, resolved once per session. */
+let chatWorldPromise = null;
+
+/**
+ * The lorebook bound to each chat, across every character.
+ *
+ * One request to `/api/chats/recent` with `metadata: true`: the server streams
+ * each chat file and keeps only its first line, which is where SillyTavern
+ * stores chat metadata. Reading the files through `/export` instead would ship
+ * the whole archive to the browser for the sake of one field per chat.
+ *
+ * @returns {Promise<{avatar: string, chatId: string, world: string}[]>}
+ */
+function allChatWorlds() {
+    chatWorldPromise ??= (async () => {
+        let found = [];
+        try {
+            const response = await fetch('/api/chats/recent', {
+                method: 'POST',
+                headers: SillyTavern.getContext().getRequestHeaders(),
+                // No `max`, so the server answers for the whole archive rather
+                // than the handful the welcome screen asks for.
+                body: JSON.stringify({ metadata: true, pinned: [] }),
+                cache: 'no-cache',
+            });
+            if (response.ok) {
+                const data = await response.json();
+                if (Array.isArray(data)) {
+                    found = data
+                        .map(item => ({
+                            avatar: String(item?.avatar ?? ''),
+                            chatId: String(item?.file_id ?? String(item?.file_name ?? '').replace(/\.jsonl$/, '')),
+                            world: String(item?.chat_metadata?.world_info ?? ''),
+                        }))
+                        .filter(item => item.chatId && item.world);
+                }
+            }
+        } catch {
+            // An unreadable archive simply contributes no options.
+        }
+
+        // The open chat may have been bound since it was last written to disk.
+        const openId = String(getCurrentChatId() ?? '');
+        const openWorld = String(chat_metadata.world_info ?? '');
+        if (openId) {
+            const existing = found.find(item => item.chatId === openId);
+            if (existing) existing.world = openWorld;
+            else if (openWorld) found.push({ avatar: currentCharacter()?.avatar ?? '', chatId: openId, world: openWorld });
+        }
+        return found.filter(item => item.world);
+    })();
+    return chatWorldPromise;
+}
+
+/**
+ * Who a recorded book belongs to, for display beside its name.
+ *
+ * Resolved from the live bindings rather than stored on the book: a character
+ * renamed since the snapshot was taken should read under its current name, and
+ * a binding that has since been undone should stop claiming an owner.
+ *
+ * @param {object} book Recorded book
+ * @param {{avatar: string, chatId: string, world: string}[]} [chatWorlds] Chat bindings, when known
+ * @returns {string} Owner names, or an empty string for an unowned book
+ */
+function worldBookOwnerLabel(book, chatWorlds = []) {
+    const sources = book.sources ?? [];
+    const names = new Set();
+
+    if (sources.some(source => CHARACTER_WORLD_SLOTS.has(source))) {
+        for (const avatar of characterOwnersOfBook(book.name)) {
+            const name = (characters ?? []).find(item => item.avatar === avatar)?.name;
+            if (name) names.add(name);
+        }
+    }
+    if (sources.some(source => PERSONA_WORLD_SLOTS.has(source))) {
+        for (const avatar of personaOwnersOfBook(book.name)) names.add(String(power_user.personas?.[avatar] ?? avatar));
+    }
+    if (sources.includes('聊天世界书')) {
+        for (const chat of chatWorlds) if (chat.world === book.name) names.add(chat.chatId);
+    }
+    return [...names].join('、');
+}
+
+/**
+ * The one character and one user this snapshot is about.
+ *
+ * A book the snapshot already holds pins this down better than the recorded
+ * context does: it is what the snapshot actually contains, and it stays right
+ * for a snapshot that never recorded a character version at all. The context
+ * is only the fallback for a snapshot that holds no bound book yet.
+ *
+ * @param {object} snapshot Snapshot being edited
+ * @returns {{characterAvatar: string|null, personaAvatar: string|null}}
+ */
+function worldEditScope(snapshot) {
+    const state = snapshot.payload?.worldInfo ?? {};
+
+    const fromBooks = (slots, ownersOf) => {
+        for (const book of state.books ?? []) {
+            if (!(book.sources ?? []).some(source => slots.has(source))) continue;
+            const owners = ownersOf(book.name);
+            // Only an unambiguous owner counts. A file shared by two characters
+            // says nothing about which one this snapshot is for.
+            if (owners.size === 1) return [...owners][0];
+        }
+        return null;
+    };
+
+    // Deliberately not falling back to the recorded context: that is merely
+    // where the snapshot was taken, not something it records. Once its last
+    // tie to a character is removed the snapshot is about nobody in
+    // particular again, and every character's books become choices.
+    return {
+        characterAvatar: fromBooks(CHARACTER_WORLD_SLOTS, characterOwnersOfBook)
+            ?? (snapshot.scopes?.character ? snapshot.payload?.character?.data?.avatar ?? null : null),
+        personaAvatar: fromBooks(PERSONA_WORLD_SLOTS, personaOwnersOfBook)
+            ?? (snapshot.scopes?.persona ? snapshot.payload?.persona?.data?.avatar ?? null : null),
+    };
+}
+
+/**
+ * The books that may still be added, grouped by the slot they would occupy.
+ *
+ * Each slot lists only books that genuinely belong to it, so picking from a
+ * group records a binding that actually exists -- there is nothing to validate
+ * afterwards. The global group is every book, because mounting one globally is
+ * a thing a snapshot really can do.
+ *
+ * @param {object} state The snapshot's world payload
+ * @param {{avatar: string, chatId: string, world: string}[]} [chatWorlds] Chat lorebook bindings
+ * @param {{characterAvatar: string|null, personaAvatar: string|null}} [scope] Who this snapshot is about
+ * @returns {Map<string, {name: string, label: string}[]>} Slot label to options
+ */
+function worldAddCandidates(state, chatWorlds = [], scope = {}) {
+    const used = new Set((state.books ?? []).map(book => book.name));
+    const groups = new Map(WORLD_SLOT_ORDER.map(slot => [slot, new Map()]));
+    const offer = (slot, name, owner = '') => {
+        if (!name || used.has(name) || !world_names.includes(name)) return;
+        const owners = groups.get(slot).get(name) ?? new Set();
+        if (owner) owners.add(owner);
+        groups.get(slot).set(name, owners);
+    };
+
+    // Every book that belongs to somebody, scoped or not. Used below to keep
+    // the global group to books with no owner at all.
+    const bound = new Set();
+    const charLore = getWorldInfoSettings().world_info?.charLore ?? [];
+    for (const character of characters ?? []) {
+        const main = String(character?.data?.extensions?.world ?? '');
+        const file = getCharaFilename(null, { manualAvatarKey: character.avatar });
+        const extras = charLore.find(item => item.name === file)?.extraBooks ?? [];
+        if (main) bound.add(main);
+        for (const extra of extras) bound.add(extra);
+
+        // A snapshot describes one character. Once we know which, the other
+        // characters' books are not choices -- they are a different snapshot.
+        if (scope.characterAvatar && character.avatar !== scope.characterAvatar) continue;
+        offer('角色主世界书', main, character.name);
+        for (const extra of extras) offer('角色附加世界书', extra, character.name);
+    }
+
+    for (const [avatar, descriptor] of Object.entries(power_user.persona_descriptions ?? {})) {
+        const book = String(descriptor?.lorebook ?? '');
+        if (book) bound.add(book);
+        if (scope.personaAvatar && avatar !== scope.personaAvatar) continue;
+        offer('用户绑定世界书', book, String(power_user.personas?.[avatar] ?? avatar));
+    }
+
+    // Every chat in the archive, so a book bound to some other character's chat
+    // is kept out of the global group too -- but only this character's chats
+    // are offered as a choice.
+    for (const chat of chatWorlds) {
+        bound.add(chat.world);
+        if (scope.characterAvatar && chat.avatar !== scope.characterAvatar) continue;
+        offer('聊天世界书', chat.world, chat.chatId);
+    }
+
+    // Global is the unowned group, and comes last. A bound book can technically
+    // be mounted globally too, but listing it here as well reads as a duplicate
+    // far more often than as a choice -- and once the snapshot is pinned to one
+    // character, another character's book is not something to offer at all.
+    for (const name of world_names) if (!bound.has(name)) offer('全局世界书', name);
+
+    return new Map([...groups].map(([slot, books]) => [
+        slot,
+        [...books].map(([name, owners]) => ({ name, label: owners.size ? `${name} · ${[...owners].join('、')}` : name })),
+    ]));
+}
+
+/**
+ * Keeps the derived parts of the world payload consistent after an edit.
+ *
+ * The mount list is rebuilt from the global slot rather than edited beside it,
+ * because applying a snapshot reads that list and nothing else to decide what
+ * to mount -- the two must not be able to disagree. Slots in use are also
+ * switched on in the recorded sources, or the next refresh would quietly drop
+ * the book that was just filed there.
+ *
+ * @param {object} snapshot Snapshot to reconcile in place
+ */
+function syncWorldPayload(snapshot) {
+    const state = snapshot.payload?.worldInfo;
+    if (!state) return;
+    state.books = Array.isArray(state.books) ? state.books : [];
+
+    const global = state.books.filter(book => (book.sources ?? []).includes('全局世界书')).map(book => book.name);
+    if (global.length || Array.isArray(state.globalSelected)) state.globalSelected = global;
+
+    snapshot.scopes ??= {};
+    snapshot.scopes.worldSources ??= {};
+    for (const book of state.books) {
+        for (const source of book.sources ?? []) {
+            const key = WORLD_SLOT_KEYS[source];
+            if (key) snapshot.scopes.worldSources[key] = true;
+        }
+    }
+    snapshot.updatedAt = Date.now();
+}
+
+/**
+ * The lorebook section of the contents popup, in edit mode.
+ *
+ * A flat list rather than the read-only view's grouping by source: a book can
+ * sit in several slots at once, so the slot is a property of the book here and
+ * not the heading it lives under.
+ *
+ * Edits are written as they are made, matching the rest of the extension --
+ * there is no draft to lose, and no second button whose meaning depends on
+ * what was touched first.
+ *
+ * @param {object} snapshot Snapshot to edit in place
+ * @param {() => void} rerender Rebuilds this section after a structural change
+ * @param {{avatar: string, chatId: string, world: string}[]} [chatWorlds] Chat lorebook bindings
+ * @returns {JQuery<HTMLElement>}
+ */
+function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
+    snapshot.payload ??= {};
+    const state = snapshot.payload.worldInfo ??= { globalSelected: null, context: {}, books: [] };
+    state.books = Array.isArray(state.books) ? state.books : [];
+
+    const details = $('<details class="ocs-content-drawer ocs-content-section ocs-content-world ocs-world-editing" open></details>');
+    details.append(
+        $('<summary></summary>').append($('<b></b>').text('世界书')),
+        $('<div class="ocs-content-drawer-body"></div>'),
+    );
+    const body = details.children('.ocs-content-drawer-body');
+
+    /** @param {boolean} structural Whether rows appeared or disappeared */
+    const commit = (structural = false) => {
+        syncWorldPayload(snapshot);
+        saveSettingsDebounced();
+        if (structural) rerender();
+    };
+
+    /**
+     * One entry, with the same toggle SillyTavern draws on preset prompts.
+     * The checkbox stays for keyboard and screen readers; the icon is the
+     * visible part, swapped by CSS on `:checked`.
+     */
+    const entrySwitch = (entry, afterChange) => {
+        const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
+        input.on('change', function () {
+            // A hand-picked state is the one to restore, so the raw value moves
+            // with it. Leaving it behind would make a group that is gated off
+            // today restore the old switch instead of this one.
+            entry.enabled = this.checked;
+            entry.rawEnabled = this.checked;
+            afterChange();
+        });
+        return $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
+    };
+
+    /**
+     * One toggle for a whole set, reading as on only when every entry is.
+     * Clicking it turns the set fully on, or fully off when it already is.
+     */
+    const bulkToggle = (entries, afterChange) => {
+        const icon = $('<i class="ocs-toggle-icon"></i>');
+        const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
+        // Re-read on demand rather than captured: single entries are toggled
+        // without a rebuild, and a captured value would go stale under them.
+        const sync = () => {
+            const all = entries.length > 0 && entries.every(entry => entry.enabled !== false);
+            icon.toggleClass('is-on', all);
+            button.attr('title', all ? '全部关闭' : '全部开启');
+            return all;
+        };
+        sync();
+        button.on('ocs:sync', sync);
+        button.on('click', event => {
+            // This can sit inside a <summary>, whose default action is to open
+            // and close the drawer it is in.
+            event.preventDefault();
+            event.stopPropagation();
+            const value = !sync();
+            for (const entry of entries) {
+                entry.enabled = value;
+                entry.rawEnabled = value;
+            }
+            afterChange(true);
+        });
+        return button;
+    };
+
+    const renderEntries = (book, showCount) => {
+        const panel = $('<div class="ocs-world-entries"></div>');
+        const entries = book.entries ?? [];
+        if (!entries.length) return panel.append($('<small></small>').text('这本世界书没有条目。'));
+
+        // Same grouping the read-only view uses, so an entry does not move
+        // between the two. The saved group wins; the live lookup covers books
+        // grouped after this snapshot was taken.
+        const livePtGroups = getPresetTransferWorldbookEntryGroups(book.name, entries.map(entry => entry.uid));
+        const groupOf = entry => entry.ptGroup || livePtGroups.get(String(entry.uid)) || entry.group || '';
+
+        // Rebuilt on a bulk change, because every switch in it may have moved.
+        const draw = () => {
+            panel.empty();
+
+            const grouped = new Map();
+            const ungrouped = [];
+            for (const entry of entries) {
+                const group = groupOf(entry);
+                if (!group) { ungrouped.push(entry); continue; }
+                if (!grouped.has(group)) grouped.set(group, []);
+                grouped.get(group).push(entry);
+            }
+
+            // Counters are refreshed in place on a single toggle, because
+            // rebuilding would collapse the group being worked through.
+            const counters = [];
+            const refreshCounts = () => {
+                showCount();
+                for (const [node, members] of counters) node.text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
+                panel.find('.ocs-world-bulk').trigger('ocs:sync');
+            };
+            const onToggle = () => { refreshCounts(); commit(); };
+
+            for (const entry of ungrouped) panel.append(entrySwitch(entry, onToggle));
+            for (const [group, members] of grouped) {
+                const counter = $('<small></small>');
+                counters.push([counter, members]);
+                const drawer = $('<details class="ocs-world-entry-group"></details>');
+                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulkToggle(members, redraw)));
+                const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
+                for (const entry of members) groupBody.append(entrySwitch(entry, onToggle));
+                panel.append(drawer.append(groupBody));
+            }
+            refreshCounts();
+        };
+        const redraw = () => {
+            const open = panel.find('details').toArray().map(node => node.open);
+            draw();
+            panel.find('details').each((index, node) => { node.open = open[index] ?? false; });
+            showCount();
+            commit();
+        };
+        draw();
+        panel.on('ocs:redraw', redraw);
+        return panel;
+    };
+
+    // Read-only: a book's slot is a binding that already exists, and one book
+    // sitting in two slots is rare enough that letting it be edited here costs
+    // more in rules than it returns. Adding is where the slot is chosen.
+    const renderSlots = (book) => {
+        const owner = worldBookOwnerLabel(book, chatWorlds);
+        const slots = (book.sources ?? []).join(' · ') || '未记录来源';
+        return $('<div class="ocs-world-slots"></div>').text(owner ? `${slots} · ${owner}` : slots);
+    };
+
+    const renderBook = (book) => {
+        const card = $('<div class="ocs-world-book"></div>');
+        const head = $('<div class="ocs-world-book-head"></div>');
+        const missing = !world_names.includes(book.name);
+        const title = $('<b></b>').text(missing ? `${book.name}（已删除）` : book.name);
+        if (missing) title.addClass('ocs-world-missing');
+
+        const total = book.entries?.length ?? 0;
+        const count = $('<small></small>');
+        /** @type {JQuery<HTMLElement>|undefined} */
+        let bulk;
+        const showCount = () => {
+            count.text(`${(book.entries ?? []).filter(entry => entry.enabled !== false).length} / ${total} 条`);
+            bulk?.trigger('ocs:sync');
+        };
+        showCount();
+
+        const entries = renderEntries(book, showCount);
+        bulk = bulkToggle(book.entries ?? [], () => entries.trigger('ocs:redraw'));
+        const expand = $('<button type="button" class="ocs-button ocs-icon-button"><i class="fa-solid fa-angles-down"></i></button>')
+            .attr('title', '展开条目')
+            .on('click', () => {
+                const open = entries.toggleClass('is-open').hasClass('is-open');
+                // The book-wide toggle only means something once the entries it
+                // acts on are visible, so it rides along with them.
+                card.toggleClass('is-expanded', open);
+                expand.attr('title', open ? '收起条目' : '展开条目')
+                    .children('i').toggleClass('fa-angles-down', !open).toggleClass('fa-angles-up', open);
+            });
+        const remove = $('<button type="button" class="ocs-button ocs-icon-button ocs-danger"><i class="fa-solid fa-trash"></i></button>')
+            .attr('title', '不再记录这本世界书')
+            .on('click', async () => {
+                if (!await Popup.show.confirm('移除世界书', `这个快照将不再记录「${book.name}」。`)) return;
+                state.books.splice(state.books.indexOf(book), 1);
+                commit(true);
+            });
+
+        head.append(title, count, bulk, expand, remove);
+        card.append(head, renderSlots(book), entries);
+        return card;
+    };
+
+    for (const book of state.books) body.append(renderBook(book));
+    if (!state.books.length) body.append($('<small class="ocs-world-empty"></small>').text('这个快照目前不记录任何世界书。'));
+
+    const candidates = worldAddCandidates(state, chatWorlds, worldEditScope(snapshot));
+    if ([...candidates.values()].some(options => options.length)) {
+        // A collapsed list per slot rather than a <select> with <optgroup>:
+        // the global group is every lorebook on the server, and a flat list of
+        // those buries the four small groups that carry the real meaning.
+        const panel = $('<div class="ocs-world-add-panel"></div>');
+        const opener = $('<button type="button" class="ocs-button ocs-world-add-open"><i class="fa-solid fa-plus"></i> 添加世界书</button>')
+            .on('click', () => panel.toggleClass('is-open'));
+
+        const pick = async (slot, name) => {
+            const conflict = worldOwnerConflict(state, name, slot);
+            if (conflict) return toastr.warning(conflict, '一键快照');
+            const fresh = await captureWorldBook({ name, sources: [slot] });
+            if (!fresh) return toastr.warning('读不到这本世界书的内容。', '一键快照');
+            state.books.push(fresh);
+            commit(true);
+        };
+
+        for (const [slot, options] of candidates) {
+            if (!options.length) continue;
+            const drawer = $('<details class="ocs-world-add-group"></details>');
+            drawer.append($('<summary></summary>').append(
+                $('<b></b>').text(slot),
+                $('<small></small>').text(`${options.length} 本`),
+            ));
+            const groupBody = $('<div class="ocs-world-add-group-body"></div>');
+            for (const option of options) {
+                groupBody.append($('<button type="button" class="ocs-world-add-item"></button>')
+                    .text(option.label)
+                    .on('click', () => void pick(slot, option.name)));
+            }
+            panel.append(drawer.append(groupBody));
+        }
+        body.append(opener, panel);
+    }
+    return details;
+}
+
 /**
  * The scope badges on a snapshot card. Editing them changes what the snapshot
  * records, and takes effect at once.
@@ -4441,11 +5314,203 @@ async function setSnapshotGroup(snapshot) {
     saveSettingsDebounced();
 }
 
-async function showSnapshotContents(snapshot) {
-    const payload = snapshot.payload ?? {};
+/** Marks a version scope that should get a fresh "初始版本" on finishing. */
+const PENDING_INITIAL_VERSION = '__ocs_pending_initial__';
+
+async function showSnapshotContents(snapshot, onChange = () => {}) {
+    // Bound to the snapshot's own object, not a stand-in: edit mode writes
+    // through this reference, and `?? {}` would hand back a detached copy for
+    // a snapshot that has no payload yet.
+    snapshot.payload ??= {};
+    const payload = snapshot.payload;
     const root = $('<div class="ocs-contents-popup"></div>');
-    root.append($('<header><span class="ocs-kicker">快照内容</span></header>'));
-    root.append($('<h3></h3>').text(snapshot.name));
+    const header = $('<header><span class="ocs-kicker">快照内容</span></header>');
+    root.append(header);
+    // The title and the add control share a row, so the plus reads as acting on
+    // this snapshot rather than as another mode button up in the bar.
+    const titleRow = $('<div class="ocs-content-title-row"></div>').append($('<h3></h3>').text(snapshot.name));
+    root.append(titleRow);
+
+    // Edit mode belongs to the page rather than to one section, so the sections
+    // that become editable later join it without growing a button each.
+    let editing = false;
+
+    /**
+     * Sections that swap between a read-only and an editable rendering.
+     *
+     * Each keeps its own host node and rebuilds into it, so toggling the mode
+     * -- or a change that adds or removes a row -- never has to close and
+     * reopen the popup.
+     *
+     * @type {(() => void)[]}
+     */
+    const sections = [];
+    const renderSections = () => sections.forEach(render => render());
+    /**
+     * @param {(editing: boolean, rerender: () => void) => JQuery<HTMLElement>|null} build
+     * @param {string} [scope] Scope key, which edit mode offers to drop
+     */
+    const mount = (build, scope = null) => {
+        const host = $('<div class="ocs-content-host"></div>');
+        const render = () => {
+            // A drawer the user had opened stays open across a rebuild, and
+            // edit mode opens it so what is editable is visible at once.
+            const wasOpen = host.children('details').prop('open') === true;
+            host.empty();
+            const node = build(editing, render);
+            if (!node) return;
+            if (node.is('details')) node.prop('open', editing || wasOpen);
+            if (editing && scope) attachScopeRemove(node, scope);
+            host.append(node);
+        };
+        sections.push(render);
+        render();
+        root.append(host);
+    };
+
+    /** Puts a drop control on a section: into its heading, or onto the row. */
+    const attachScopeRemove = (node, scope) => {
+        const label = SNAPSHOT_SCOPE_LABELS[scope] ?? scope;
+        const button = $('<button type="button" class="ocs-content-scope-remove"></button>')
+            .attr({ title: `不再记录${label}`, 'aria-label': `不再记录${label}` })
+            .append('<i class="fa-solid fa-xmark"></i>')
+            .on('click', async (event) => {
+                // In a <summary> this would otherwise toggle the drawer too.
+                event.preventDefault();
+                event.stopPropagation();
+                if (!await Popup.show.confirm('移除记录范围', `这个快照将不再记录${label}，已经记下的内容会丢失。`)) return;
+                payload[scope] = null;
+                snapshot.scopes[scope] = false;
+                snapshot.updatedAt = Date.now();
+                saveSettingsDebounced();
+                renderSections();
+            });
+        if (node.is('details')) node.children('summary').append(button);
+        else node.append(button);
+    };
+    // Edits are written as they are made, so undoing them means keeping a copy
+    // from before the mode was entered. The recorded sources travel with it:
+    // filing a book into a slot switches that source on.
+    let restorePoint = null;
+    // Resolved once on entering edit mode: reading a chat that is not open
+    // costs a request, and the answer cannot change while the popup is up.
+    let chatWorlds = [];
+    const EDITABLE_SCOPES = ['character', 'persona', 'theme', 'worldInfo', 'preset', 'regex'];
+    if (feature('snapshot.contentEditor') && EDITABLE_SCOPES.some(scope => snapshot.scopes?.[scope])) {
+        const toggle = $('<button type="button" class="ocs-button ocs-content-edit-toggle">修改</button>');
+        const cancel = $('<button type="button" class="ocs-button ocs-content-edit-cancel">取消</button>');
+        const badge = $('<small class="ocs-content-editing-badge">修改中</small>');
+        // Icon only, in the same shape the regex section uses for adding a
+        // source: one affordance for "add something here", not two.
+        const addScope = $('<button type="button" class="ocs-content-add-scope-button"><i class="fa-solid fa-plus"></i></button>')
+            .attr({ title: '添加记录范围', 'aria-label': '添加记录范围' });
+
+        addScope.on('click', async () => {
+            // `api` is left out: it has no editor, so adding it here would
+            // record the live connection and then offer no way to change it.
+            const missing = Object.entries(SNAPSHOT_SCOPE_LABELS)
+                .filter(([key]) => snapshot.scopes?.[key] !== true && emptyScopePayload(key));
+            if (!missing.length) return toastr.info('这个快照已经记录了所有可编辑的范围。', '一键快照');
+
+            const root = $('<div class="ocs-scope-source-picker"></div>');
+            const select = $('<select class="text_pole"></select>');
+            for (const [key, label] of missing) select.append($('<option></option>').val(key).text(label));
+            root.append($('<p></p>').text('新增的范围是空的，加进来之后在这一页挑选内容。'), select);
+            const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, '添加记录范围', {
+                wide: false,
+                leftAlign: true,
+                okButton: '添加',
+                cancelButton: '取消',
+            });
+            popup.dlg.classList.add('ocs-dialog');
+            if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return;
+
+            const key = String(select.val() ?? '');
+            const shell = emptyScopePayload(key);
+            if (!shell) return;
+            payload[key] = shell;
+            snapshot.scopes[key] = true;
+            if (key === 'regex') snapshot.scopes.regexSources = Object.fromEntries(REGEX_SCOPE_TYPES.map(([source]) => [source, true]));
+            snapshot.updatedAt = Date.now();
+            saveSettingsDebounced();
+            renderSections();
+        });
+
+        /**
+         * Turns any "create one on finish" choice into a real version.
+         *
+         * Deferred to here rather than done at pick time so that cancelling
+         * discards the intent instead of leaving an unused version behind --
+         * the restore point covers the snapshot, not the version library.
+         */
+        const materialisePendingVersions = () => {
+            let created = false;
+            for (const scope of ['character', 'persona']) {
+                const record = payload[scope];
+                if (!record?.pendingInitial) continue;
+                const version = createInitialVersionFor(scope, record.data?.avatar ?? '');
+                if (!version) {
+                    toastr.warning(`没能为${scope === 'character' ? '角色' : '用户'}新建初始版本，该范围仍未指向任何版本。`, '一键快照');
+                    continue;
+                }
+                record.versionId = version.id;
+                record.versionName = version.name;
+                delete record.pendingInitial;
+                created = true;
+                toastr.info(`已为「${record.data?.name || version.data?.name || ''}」新建「初始版本」。`, '一键快照');
+            }
+            if (!created) return;
+            saveSettingsDebounced();
+            refreshVersionIndicators();
+        };
+
+        const leave = () => {
+            editing = false;
+            materialisePendingVersions();
+            toggle.text('修改').removeClass('ocs-active');
+            cancel.removeClass('is-shown');
+            addScope.removeClass('is-shown');
+            badge.removeClass('is-shown');
+            root.removeClass('ocs-editing');
+            renderSections();
+            // The library behind the popup shows the scope badges and the
+            // updated time, both of which an edit moves.
+            onChange();
+        };
+
+        cancel.on('click', () => {
+            if (restorePoint) {
+                // Restored into the existing object rather than replacing it:
+                // every section holds a reference to this one, and swapping it
+                // out would leave them all editing something detached.
+                for (const key of Object.keys(payload)) delete payload[key];
+                Object.assign(payload, deepClone(restorePoint.payload));
+                snapshot.scopes = deepClone(restorePoint.scopes);
+                snapshot.updatedAt = restorePoint.updatedAt;
+                saveSettingsDebounced();
+            }
+            leave();
+        });
+
+        toggle.on('click', async () => {
+            if (editing) return leave();
+            editing = true;
+            restorePoint = {
+                payload: deepClone(payload),
+                scopes: deepClone(snapshot.scopes ?? {}),
+                updatedAt: snapshot.updatedAt,
+            };
+            if (snapshot.scopes?.worldInfo) chatWorlds = await allChatWorlds();
+            toggle.text('完成').addClass('ocs-active');
+            cancel.addClass('is-shown');
+            addScope.addClass('is-shown');
+            badge.addClass('is-shown');
+            root.addClass('ocs-editing');
+            renderSections();
+        });
+        header.append($('<div class="ocs-content-edit-actions"></div>').append(badge, cancel, toggle));
+        titleRow.append(addScope);
+    }
     // The native inline-drawer rhythm is clearer than a cascade of tiny,
     // indented disclosure rows. Every level keeps the same reading size.
     const makeDrawer = (className, title, count = '') => {
@@ -4487,96 +5552,413 @@ async function showSnapshotContents(snapshot) {
         const enabled = (book.entries ?? []).filter(entry => entry.enabled);
         const livePtGroups = getPresetTransferWorldbookEntryGroups(book.name, (book.entries ?? []).map(entry => entry.uid));
         const bookNode = makeDrawer('ocs-content-book', book.name, `${enabled.length} 条`).data('ocs-book-name', book.name);
+        // Appended inside the <b> so it stays next to the name: that heading
+        // pushes everything after it to the far end of the row.
+        const owner = worldBookOwnerLabel(book, chatWorlds);
+        if (owner) bookNode.children('summary').children('b').append($('<small class="ocs-world-owner"></small>').text(` · ${owner}`));
         appendBookEntries(bookNode, enabled, livePtGroups);
         return bookNode;
     };
-    if (snapshot.scopes?.character) {
-        const name = payload.character?.data?.name ?? '未知角色';
-        const version = payload.character?.versionName ?? '当前未命名状态';
-        root.append($('<div class="ocs-version-value"><span>角色版本</span><strong></strong></div>').find('strong').text(`${name} · ${version}`).end());
-    }
-    if (snapshot.scopes?.persona) {
-        const name = payload.persona?.data?.name ?? '未知用户';
-        const version = payload.persona?.versionName ?? '当前未命名状态';
-        root.append($('<div class="ocs-version-value"><span>用户版本</span><strong></strong></div>').find('strong').text(`${name} · ${version}`).end());
-    }
-    if (snapshot.scopes?.theme) {
-        const savedName = themeNameFromPayload(payload);
-        const exists = $('#themes option').filter((_, option) => String(option.value) === savedName).length > 0;
-        const label = savedName ? (exists ? savedName : `${savedName}（已删除）`) : '未选择美化';
-        root.append($('<div class="ocs-version-value"><span>界面美化</span><strong></strong></div>').find('strong').text(label).end());
-    }
-    if (snapshot.scopes?.worldInfo) {
-        const section = makeDrawer('ocs-content-section ocs-content-world', '世界书启用');
-        const sectionBody = drawerBody(section);
-        const books = payload.worldInfo?.books ?? [];
-        const appendSource = (source, { collapsible = false } = {}) => {
-            const sourceBooks = books.filter(book => book.sources?.includes(source));
-            if (!sourceBooks.length) return;
-            const sourceBlock = collapsible
-                ? makeDrawer('ocs-content-source ocs-content-global-source', source, `${sourceBooks.length} 本`)
-                : $('<section class="ocs-content-source"></section>');
-            const sourceBody = collapsible ? drawerBody(sourceBlock) : $('<div class="ocs-content-source-body"></div>');
-            if (!collapsible) sourceBlock.append($('<div class="ocs-content-source-title"></div>').append($('<b></b>').text(source), $('<small></small>').text(`${sourceBooks.length} 本`)), sourceBody);
-            sourceBooks.forEach(book => sourceBody.append(bookDetails(book)));
-            sectionBody.append(sourceBlock);
-        };
-        // A single global book reads better as a normal source row. Only a
-        // collection needs the extra disclosure level.
-        appendSource('全局世界书', { collapsible: books.filter(book => book.sources?.includes('全局世界书')).length >= 2 });
-        appendSource('角色主世界书');
-        appendSource('角色附加世界书');
-        appendSource('用户绑定世界书');
-        appendSource('聊天世界书');
-        if (!books.length) {
-            sectionBody.append(itemList([], '没有已保存的世界书'));
-        }
-        root.append(section);
-    }
-    if (snapshot.scopes?.preset) {
-        const presetLabel = payload.preset?.presetName ?? '未选择预设';
-        const manager = getPresetManager();
-        const selectedPreset = manager?.getCompletionPresetByName?.(payload.preset?.presetName);
-        const livePromptGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
-        const usePresetGroups = Boolean(presetGroupingProvider());
-        const nodes = [];
-        const groups = new Map();
-        const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-        const presetDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
-        const presetBody = drawerBody(presetDrawer);
-        const parameterLines = presetParameterLines(payload.preset?.parameters);
-        const parameterDrawer = makeDrawer('ocs-content-preset-section', '预设参数', parameterLines.length ? `${parameterLines.length} 项` : '');
-        drawerBody(parameterDrawer).append(itemList(parameterLines, '该快照未保存预设参数'));
-        presetBody.append(parameterDrawer);
+    /** One labelled row, either read-only text or a dropdown. */
+    const valueRow = (title, text) => $('<div class="ocs-version-value"><span></span><strong></strong></div>')
+        .find('span').text(title).end()
+        .find('strong').text(text).end();
 
-        const entriesDrawer = makeDrawer('ocs-content-preset-section', '启用条目', `${enabledEntries.length} 条`);
-        const entriesBody = drawerBody(entriesDrawer);
-        for (const entry of enabledEntries) {
-            const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
-            if (!group) { nodes.push(entry.label); continue; }
-            let node = groups.get(group);
-            if (!node) {
-                node = { group, entries: [] };
-                groups.set(group, node);
-                nodes.push(node);
+    const selectRow = (title, options, current, onPick) => {
+        const row = $('<div class="ocs-version-value"></div>').append($('<span></span>').text(title));
+        const select = $('<select class="text_pole ocs-content-select"></select>');
+        // A recorded value that no longer exists is kept as its own option, or
+        // `val()` would silently fall through to whatever sorts first and read
+        // as a change the user never made.
+        const known = options.some(option => option.value === current);
+        if (!known && current) select.append($('<option></option>').val(current).text(`${current}（已删除）`));
+        for (const option of options) select.append($('<option></option>').val(option.value).text(option.label));
+        select.val(current);
+        select.on('change', function () { onPick(String(this.value)); });
+        return row.append(select);
+    };
+
+    /** Two dropdowns on one row: pick the owner, then one of its versions. */
+    const twoStepRow = (title, owners, currentOwner, currentValue, onPick) => {
+        const row = $('<div class="ocs-version-value ocs-version-pick"></div>').append($('<span></span>').text(title));
+        const pair = $('<div class="ocs-version-pick-pair"></div>');
+
+        const ownerSelect = $('<select class="text_pole ocs-content-select"></select>');
+        for (const owner of owners) ownerSelect.append($('<option></option>').val(owner.value).text(owner.label));
+        const valueSelect = $('<select class="text_pole ocs-content-select"></select>');
+
+        // Two short lists instead of one long one: with many characters, or
+        // many versions of one, a single flat list is unusable on a phone.
+        // A scope that holds nothing yet starts genuinely unset. Showing the
+        // first entry preselected would claim a pairing the snapshot does not
+        // hold, which then reads as "未知角色" the moment the row is redrawn.
+        const placeholder = '__ocs_unset__';
+        if (!currentOwner) ownerSelect.append($('<option></option>').val(placeholder).text('请选择…'));
+
+        const fillValues = (ownerValue, selected) => {
+            const owner = owners.find(item => item.value === ownerValue);
+            valueSelect.empty();
+            if (!owner) {
+                valueSelect.append($('<option></option>').val(placeholder).text('请先选择'));
+                valueSelect.val(placeholder);
+                return '';
             }
-            node.entries.push(entry.label);
-        }
-        const pendingFlat = [];
-        const flushFlat = () => {
-            if (pendingFlat.length) entriesBody.append(itemList(pendingFlat.splice(0)));
+            for (const option of owner.options) valueSelect.append($('<option></option>').val(option.value).text(option.label));
+            const known = owner.options.some(option => option.value === selected);
+            valueSelect.val(known ? selected : (owner.options[0]?.value ?? ''));
+            return String(valueSelect.val() ?? '');
         };
-        for (const node of nodes) {
-            if (typeof node === 'string') { pendingFlat.push(node); continue; }
+
+        ownerSelect.val(currentOwner || placeholder);
+        fillValues(currentOwner, currentValue);
+
+        ownerSelect.on('change', function () {
+            // Choosing an owner commits its first version straight away, so the
+            // row never shows a pairing the snapshot does not hold.
+            const picked = fillValues(String(this.value), '');
+            if (picked) onPick(String(this.value), picked);
+        });
+        valueSelect.on('change', function () { onPick(String(ownerSelect.val() ?? ''), String(this.value)); });
+
+        return row.append(pair.append(ownerSelect, valueSelect));
+    };
+
+    const mountVersion = (scope, title, store, fallback, nameOf) => {
+        mount((isEditing) => {
+            // Checked here rather than around the mount: a scope added while
+            // the popup is open has to be able to appear without rebuilding it.
+            if (!snapshot.scopes?.[scope]) return null;
+            const record = payload[scope];
+            const name = record?.data?.name ?? fallback;
+            const stored = `${name} · ${record?.versionName ?? '当前未命名状态'}`;
+            if (!isEditing) return valueRow(title, stored);
+
+            // Every owner that has versions, not only the recorded one: moving
+            // a snapshot to a different character is as reasonable an edit as
+            // moving it to a different version of the same one.
+            const owners = Object.entries(settings()[store] ?? {})
+                .filter(([, versions]) => Array.isArray(versions) && versions.length)
+                .map(([avatar, versions]) => ({
+                    value: avatar,
+                    label: nameOf(avatar) || avatar,
+                    options: versions.map(version => ({ value: version.id, label: version.name })),
+                }));
+
+            // With auto-initial on, owners that have no version yet are offered
+            // too. The version is not made here but on leaving edit mode, so
+            // cancelling does not leave one behind in the library.
+            if (feature('version.autoInitial')) {
+                const covered = new Set(owners.map(owner => owner.value));
+                const candidates = scope === 'character'
+                    ? (characters ?? []).map(item => item.avatar)
+                    : Object.keys(power_user.personas ?? {});
+                for (const avatar of candidates) {
+                    if (!avatar || covered.has(avatar)) continue;
+                    owners.push({
+                        value: avatar,
+                        label: nameOf(avatar) || avatar,
+                        options: [{ value: PENDING_INITIAL_VERSION, label: '新建「初始版本」' }],
+                    });
+                }
+            }
+            if (!owners.length) return valueRow(title, stored);
+
+            const currentValue = record?.pendingInitial ? PENDING_INITIAL_VERSION : record?.versionId ?? '';
+            return twoStepRow(title, owners, record?.data?.avatar ?? '', currentValue, (avatar, versionId) => {
+                if (versionId === PENDING_INITIAL_VERSION) {
+                    payload[scope] = {
+                        ...record,
+                        versionId: null,
+                        versionName: '初始版本',
+                        pendingInitial: true,
+                        data: { ...(record?.data ?? {}), avatar, name: nameOf(avatar) || fallback },
+                    };
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                    return;
+                }
+                const picked = (settings()[store]?.[avatar] ?? []).find(version => version.id === versionId);
+                if (!picked) return;
+                // Only the reference moves. The version's own content stays in
+                // the version library, which is what lets a later edit there
+                // reach every snapshot pointing at it.
+                payload[scope] = {
+                    ...record,
+                    versionId: picked.id,
+                    versionName: picked.name,
+                    pendingInitial: false,
+                    data: { ...(record?.data ?? {}), avatar, name: nameOf(avatar) || fallback },
+                };
+                snapshot.updatedAt = Date.now();
+                saveSettingsDebounced();
+            });
+        }, scope);
+    };
+    mountVersion('character', '角色版本', 'characterVersions', '未知角色',
+        avatar => (characters ?? []).find(item => item.avatar === avatar)?.name ?? '');
+    mountVersion('persona', '用户版本', 'personaVersions', '未知用户',
+        avatar => String(power_user.personas?.[avatar] ?? ''));
+
+    {
+        mount((isEditing) => {
+            if (!snapshot.scopes?.theme) return null;
+            const savedName = themeNameFromPayload(payload);
+            const themes = $('#themes option').toArray().map(option => String(option.value)).filter(Boolean);
+            if (!isEditing) {
+                const label = savedName ? (themes.includes(savedName) ? savedName : `${savedName}（已删除）`) : '未选择美化';
+                return valueRow('界面美化', label);
+            }
+            return selectRow('界面美化', themes.map(name => ({ value: name, label: name })), savedName, (value) => {
+                payload.theme = { name: value };
+                snapshot.updatedAt = Date.now();
+                saveSettingsDebounced();
+            });
+        }, 'theme');
+    }
+    {
+        const buildWorldView = () => {
+            const section = makeDrawer('ocs-content-section ocs-content-world', '世界书启用');
+            const sectionBody = drawerBody(section);
+            const books = payload.worldInfo?.books ?? [];
+            const appendSource = (source, { collapsible = false } = {}) => {
+                const sourceBooks = books.filter(book => book.sources?.includes(source));
+                if (!sourceBooks.length) return;
+                const sourceBlock = collapsible
+                    ? makeDrawer('ocs-content-source ocs-content-global-source', source, `${sourceBooks.length} 本`)
+                    : $('<section class="ocs-content-source"></section>');
+                const sourceBody = collapsible ? drawerBody(sourceBlock) : $('<div class="ocs-content-source-body"></div>');
+                if (!collapsible) sourceBlock.append($('<div class="ocs-content-source-title"></div>').append($('<b></b>').text(source), $('<small></small>').text(`${sourceBooks.length} 本`)), sourceBody);
+                sourceBooks.forEach(book => sourceBody.append(bookDetails(book)));
+                sectionBody.append(sourceBlock);
+            };
+            // A single global book reads better as a normal source row. Only a
+            // collection needs the extra disclosure level.
+            appendSource('全局世界书', { collapsible: books.filter(book => book.sources?.includes('全局世界书')).length >= 2 });
+            appendSource('角色主世界书');
+            appendSource('角色附加世界书');
+            appendSource('用户绑定世界书');
+            appendSource('聊天世界书');
+            if (!books.length) {
+                sectionBody.append(itemList([], '没有已保存的世界书'));
+            }
+            return section;
+        };
+        mount((isEditing, rerender) => {
+            if (!snapshot.scopes?.worldInfo) return null;
+            return isEditing ? renderWorldEditor(snapshot, rerender, chatWorlds) : buildWorldView();
+        }, 'worldInfo');
+        // Chat names are only known once the archive answers. Rendering waits
+        // for nothing and redraws when they arrive; the lookup is cached, so
+        // this costs one request per session.
+        void allChatWorlds().then((list) => {
+            chatWorlds = list;
+            renderSections();
+        });
+    }
+    {
+        const buildPresetView = () => {
+            const presetLabel = payload.preset?.presetName ?? '未选择预设';
+            const manager = getPresetManager();
+            const selectedPreset = manager?.getCompletionPresetByName?.(payload.preset?.presetName);
+            const livePromptGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
+            const usePresetGroups = Boolean(presetGroupingProvider());
+            const nodes = [];
+            const groups = new Map();
+            const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
+            const presetDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
+            const presetBody = drawerBody(presetDrawer);
+            const parameterLines = presetParameterLines(payload.preset?.parameters);
+            const parameterDrawer = makeDrawer('ocs-content-preset-section', '预设参数', parameterLines.length ? `${parameterLines.length} 项` : '');
+            drawerBody(parameterDrawer).append(itemList(parameterLines, '该快照未保存预设参数'));
+            presetBody.append(parameterDrawer);
+
+            const entriesDrawer = makeDrawer('ocs-content-preset-section', '启用条目', `${enabledEntries.length} 条`);
+            const entriesBody = drawerBody(entriesDrawer);
+            for (const entry of enabledEntries) {
+                const group = usePresetGroups ? entry.group || livePromptGroups.get(entry.identifier) || '' : '';
+                if (!group) { nodes.push(entry.label); continue; }
+                let node = groups.get(group);
+                if (!node) {
+                    node = { group, entries: [] };
+                    groups.set(group, node);
+                    nodes.push(node);
+                }
+                node.entries.push(entry.label);
+            }
+            const pendingFlat = [];
+            const flushFlat = () => {
+                if (pendingFlat.length) entriesBody.append(itemList(pendingFlat.splice(0)));
+            };
+            for (const node of nodes) {
+                if (typeof node === 'string') { pendingFlat.push(node); continue; }
+                flushFlat();
+                const group = makeDrawer('ocs-content-group', node.group, `${node.entries.length} 条`);
+                drawerBody(group).append(itemList(node.entries));
+                entriesBody.append(group);
+            }
             flushFlat();
-            const group = makeDrawer('ocs-content-group', node.group, `${node.entries.length} 条`);
-            drawerBody(group).append(itemList(node.entries));
-            entriesBody.append(group);
-        }
-        flushFlat();
-        if (!nodes.length) entriesBody.append(itemList([], '没有启用的预设条目'));
-        presetBody.append(entriesDrawer);
-        root.append(presetDrawer);
+            if (!nodes.length) entriesBody.append(itemList([], '没有启用的预设条目'));
+            presetBody.append(entriesDrawer);
+                return presetDrawer;
+        };
+
+        /** Which preset the snapshot points at, its entries and its parameters. */
+        const buildPresetEditor = () => {
+            const state = payload.preset ??= { api: main_api, presetName: '', promptEntries: [], parameters: null };
+            const manager = getPresetManager();
+            const { preset_names: names } = manager?.getPresetList?.() ?? {};
+            const available = Array.isArray(names) ? names : Object.keys(names ?? {});
+            const selectedPreset = manager?.getCompletionPresetByName?.(state.presetName);
+
+            const section = $('<details class="ocs-content-drawer ocs-content-section ocs-content-preset" open></details>');
+            section.append(
+                $('<summary></summary>').append($('<b></b>').text('预设与条目'), $('<small></small>').text(state.presetName || '未选择预设')),
+                $('<div class="ocs-content-drawer-body"></div>'),
+            );
+            const body = section.children('.ocs-content-drawer-body');
+
+            body.append(selectRow('预设', available.map(name => ({ value: name, label: name })), state.presetName ?? '', (value) => {
+                const preset = manager?.getCompletionPresetByName?.(value);
+                if (!preset) return toastr.warning('读不到这个预设的内容。', '一键快照');
+                const labels = new Map((preset.prompts ?? []).map(prompt => [prompt.identifier, prompt.name || prompt.identifier]));
+                const groups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, preset);
+                // Read straight off the preset object, so a snapshot can point
+                // at a preset that was never loaded.
+                state.presetName = value;
+                state.presetValue = null;
+                state.promptEntries = (preset.prompt_order ?? []).flatMap(list => (list.order ?? []).map(item => ({
+                    identifier: item.identifier,
+                    label: labels.get(item.identifier) ?? item.identifier,
+                    enabled: !!item.enabled,
+                    group: groups.get(item.identifier) ?? '',
+                })));
+                state.parameters = presetParametersOf(preset);
+                snapshot.updatedAt = Date.now();
+                saveSettingsDebounced();
+                renderSections();
+            }));
+
+            /* ---------------------------------------------------- parameters -- */
+            const parameters = state.parameters ?? {};
+            const paramKeys = [...PRESET_PARAMETER_KEYS].filter(key => Object.hasOwn(parameters, key));
+            const paramDrawer = makeDrawer('ocs-content-preset-section', '预设参数', paramKeys.length ? `共 ${paramKeys.length} 项` : '未记录');
+            const paramBody = drawerBody(paramDrawer);
+            if (!paramKeys.length) {
+                paramBody.append($('<small></small>').text('该快照未保存预设参数。'));
+            } else {
+                for (const key of paramKeys) {
+                    const [, , isCheckbox] = settingsToUpdate[key] ?? [];
+                    const label = PRESET_PARAMETER_LABELS[key] ?? key;
+                    const row = $('<div class="ocs-content-param"></div>').append($('<span></span>').text(label));
+                    if (isCheckbox) {
+                        const input = $('<input type="checkbox">').prop('checked', !!parameters[key]);
+                        input.on('change', function () {
+                            parameters[key] = this.checked;
+                            snapshot.updatedAt = Date.now();
+                            saveSettingsDebounced();
+                        });
+                        row.append($('<label class="ocs-world-entry ocs-content-param-toggle"></label>').append(input, '<i class="ocs-toggle-icon"></i>'));
+                    } else {
+                        const numeric = typeof parameters[key] === 'number';
+                        const input = $('<input class="text_pole ocs-content-param-input">')
+                            .attr('type', numeric ? 'number' : 'text')
+                            .attr('step', 'any')
+                            .val(parameters[key] ?? '');
+                        input.on('change', function () {
+                            const raw = String(this.value);
+                            // Kept in the type it was captured as, so applying
+                            // writes back what the preset control expects.
+                            parameters[key] = numeric ? (raw === '' ? null : Number(raw)) : raw;
+                            snapshot.updatedAt = Date.now();
+                            saveSettingsDebounced();
+                        });
+                        row.append(input);
+                    }
+                    paramBody.append(row);
+                }
+            }
+            body.append(paramDrawer);
+
+            /* ------------------------------------------------------- entries -- */
+            const entries = state.promptEntries ?? [];
+            const liveGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
+            const useGroups = Boolean(presetGroupingProvider());
+            const groupOf = entry => (useGroups ? entry.group || liveGroups.get(entry.identifier) || '' : '');
+
+            const entryToggle = (entry, afterChange) => {
+                const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
+                input.on('change', function () {
+                    entry.enabled = this.checked;
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                    afterChange();
+                });
+                return $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.identifier));
+            };
+
+            const entriesDrawer = makeDrawer('ocs-content-preset-section', '条目', `已开启 ${entries.filter(entry => entry.enabled !== false).length} / ${entries.length} 条`);
+            const entriesBody = drawerBody(entriesDrawer);
+            const list = $('<div class="ocs-world-entries is-open"></div>');
+            if (!entries.length) list.append($('<small></small>').text('这个预设没有可记录的条目。'));
+
+            const grouped = new Map();
+            const ungrouped = [];
+            for (const entry of entries) {
+                const group = groupOf(entry);
+                if (!group) { ungrouped.push(entry); continue; }
+                if (!grouped.has(group)) grouped.set(group, []);
+                grouped.get(group).push(entry);
+            }
+
+            const counters = [];
+            const refresh = () => {
+                for (const [node, members] of counters) node.text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
+                list.find('.ocs-world-bulk').trigger('ocs:sync');
+                entriesDrawer.children('summary').children('small').text(`已开启 ${entries.filter(entry => entry.enabled !== false).length} / ${entries.length} 条`);
+            };
+            const bulk = (members) => {
+                const icon = $('<i class="ocs-toggle-icon"></i>');
+                const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
+                const sync = () => {
+                    const all = members.length > 0 && members.every(entry => entry.enabled !== false);
+                    icon.toggleClass('is-on', all);
+                    button.attr('title', all ? '全部关闭' : '全部开启');
+                    return all;
+                };
+                sync();
+                button.on('ocs:sync', sync);
+                button.on('click', (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const value = !sync();
+                    for (const entry of members) entry.enabled = value;
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                    renderSections();
+                });
+                return button;
+            };
+
+            for (const entry of ungrouped) list.append(entryToggle(entry, refresh));
+            for (const [group, members] of grouped) {
+                const counter = $('<small></small>');
+                counters.push([counter, members]);
+                const drawer = $('<details class="ocs-world-entry-group"></details>');
+                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulk(members)));
+                const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
+                for (const entry of members) groupBody.append(entryToggle(entry, refresh));
+                list.append(drawer.append(groupBody));
+            }
+            refresh();
+            entriesBody.append(list);
+            body.append(entriesDrawer);
+            return section;
+        };
+
+        mount((isEditing) => {
+            if (!snapshot.scopes?.preset) return null;
+            return isEditing ? buildPresetEditor() : buildPresetView();
+        }, 'preset');
     }
     if (snapshot.scopes?.api) {
         const state = payload.api ?? {};
@@ -4584,30 +5966,286 @@ async function showSnapshotContents(snapshot) {
         drawerBody(section).append(itemList(apiStateLines(state), '该快照未保存 API 设置'));
         root.append(section);
     }
-    if (snapshot.scopes?.regex) {
-        const sources = payload.regex?.sources ?? {};
-        const section = makeDrawer('ocs-content-section ocs-content-regex', '正则与启用规则');
-        const body = drawerBody(section);
-        const labels = [
-            ['global', '全局正则'],
-            ['scoped', '角色局部正则'],
-            ['preset', '当前预设正则'],
-        ];
-        for (const [key, title] of labels) {
-            const source = sources[key];
-            if (!source) continue;
-            const enabled = (source.scripts ?? []).filter(script => script.enabled).map(script => script.label || script.id);
-            const count = key === 'preset'
-                ? `${payload.regex?.context?.presetName || '未选择预设'} · ${enabled.length} 条`
-                : `${enabled.length} 条`;
-            // Regex categories are source markers, like worldbook sources;
-            // keep their children behind the same optional disclosure layer.
-            const drawer = makeDrawer('ocs-content-source ocs-content-regex-source', title, count);
-            drawerBody(drawer).append(itemList(enabled));
-            body.append(drawer);
-        }
-        root.append(section);
+    {
+        const REGEX_SOURCE_TITLES = [['global', '全局正则'], ['scoped', '角色局部正则'], ['preset', '当前预设正则']];
+        const REGEX_SOURCE_TYPES = { global: SCRIPT_TYPES.GLOBAL, scoped: SCRIPT_TYPES.SCOPED, preset: SCRIPT_TYPES.PRESET };
+
+        /** Loads an owner's rules in, keeping the switches already chosen. */
+        const loadRegexScripts = (source, type, owner) => {
+            // Recording an owner's rules at all implies they are meant to run,
+            // so the permission SillyTavern keeps per character/preset is set
+            // along with them rather than left at its default.
+            source.allowed = true;
+            const chosen = new Map((source.scripts ?? []).map(script => [script.id, !!script.enabled]));
+            source.scripts = regexScriptsOf(type, owner).map(script => ({
+                id: script.id,
+                label: script.scriptName || script.id,
+                // Default off: this page is for choosing what to record, not
+                // for taking a copy of how the owner happens to be set up.
+                enabled: chosen.get(script.id) ?? false,
+            }));
+        };
+
+        /** Picks whose rules a source describes: a character, or a preset. */
+        const regexOwnerRow = (key, source, context) => {
+            if (key === 'scoped') {
+                const owners = (characters ?? [])
+                    .filter(character => Array.isArray(character?.data?.extensions?.regex_scripts) && character.data.extensions.regex_scripts.length)
+                    .map(character => ({ value: character.avatar, label: character.name }));
+                if (!owners.length) return $('<small></small>').text('没有任何角色卡带有局部正则。');
+                return selectRow('角色', owners, context.characterAvatar ?? '', (value) => {
+                    context.characterAvatar = value;
+                    context.characterName = owners.find(owner => owner.value === value)?.label ?? '';
+                    loadRegexScripts(source, SCRIPT_TYPES.SCOPED, value);
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                    renderSections();
+                });
+            }
+
+            const { preset_names: names } = getPresetManager()?.getPresetList?.() ?? {};
+            const owners = (Array.isArray(names) ? names : Object.keys(names ?? {})).map(name => ({ value: name, label: name }));
+            if (!owners.length) return null;
+            return selectRow('预设', owners, context.presetName ?? '', (value) => {
+                context.presetName = value;
+                context.presetApi = getCurrentPresetAPI();
+                loadRegexScripts(source, SCRIPT_TYPES.PRESET, value);
+                snapshot.updatedAt = Date.now();
+                saveSettingsDebounced();
+                renderSections();
+            });
+        };
+
+        /** A source starts with whatever it can list without being told more. */
+        const emptyRegexSource = key => (key === 'global'
+            ? { scripts: getScriptsByType(SCRIPT_TYPES.GLOBAL).map(script => ({ id: script.id, label: script.scriptName || script.id, enabled: false })) }
+            : { scripts: [], allowed: true });
+
+        /** Asks which source to bring back, or answers straight off for one. */
+        const pickRegexSource = async (options) => {
+            if (options.length === 1) return options[0][0];
+            const root = $('<div class="ocs-scope-source-picker"></div>');
+            const select = $('<select class="text_pole"></select>');
+            for (const [value, label] of options) select.append($('<option></option>').val(value).text(label));
+            root.append($('<p></p>').text('选择要重新记录的正则来源。'), select);
+            const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, '添加正则来源', {
+                wide: false,
+                leftAlign: true,
+                okButton: '确定',
+                cancelButton: '取消',
+            });
+            popup.dlg.classList.add('ocs-dialog');
+            if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return '';
+            return String(select.val() ?? '');
+        };
+
+        const buildRegexSection = (isEditing) => {
+            const state = payload.regex ??= { context: {}, sources: {} };
+            const sources = state.sources ??= {};
+            const context = state.context ??= {};
+            const section = makeDrawer('ocs-content-section ocs-content-regex', '正则与启用规则');
+            const body = drawerBody(section);
+
+            // Unlike a lorebook, a regex source holds nothing that can be
+            // deleted down to nothing, so dropping a whole category needs its
+            // own control -- and a way back.
+            if (isEditing) {
+                const absent = REGEX_SOURCE_TITLES.filter(([key]) => !sources[key]);
+                if (absent.length) {
+                    section.children('summary').append($('<button type="button" class="ocs-content-source-add"></button>')
+                        .attr({ title: '添加正则来源', 'aria-label': '添加正则来源' })
+                        .append('<i class="fa-solid fa-plus"></i>')
+                        .on('click', async (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            const key = await pickRegexSource(absent);
+                            if (!key) return;
+                            sources[key] = emptyRegexSource(key);
+                            snapshot.scopes.regexSources ??= {};
+                            snapshot.scopes.regexSources[key] = true;
+                            snapshot.updatedAt = Date.now();
+                            saveSettingsDebounced();
+                            renderSections();
+                        }));
+                }
+            }
+
+            for (const [key, title] of REGEX_SOURCE_TITLES) {
+                const source = sources[key];
+                if (!source) continue;
+                const groups = regexGroupMap(key, context);
+                const scripts = source.scripts ?? [];
+                const enabled = scripts.filter(script => script.enabled);
+                const owner = key === 'scoped' ? context.characterName : key === 'preset' ? context.presetName : '';
+                const count = owner
+                    ? `${owner} · ${enabled.length}${isEditing ? ` / ${scripts.length}` : ''} 条`
+                    : `${enabled.length}${isEditing ? ` / ${scripts.length}` : ''} 条`;
+                // Regex categories are source markers, like worldbook sources;
+                // keep their children behind the same optional disclosure layer.
+                const drawer = makeDrawer('ocs-content-source ocs-content-regex-source', title, count);
+                const sourceBody = drawerBody(drawer);
+
+                if (isEditing) {
+                    drawer.children('summary').append($('<button type="button" class="ocs-content-scope-remove"></button>')
+                        .attr({ title: `不再记录${title}`, 'aria-label': `不再记录${title}` })
+                        .append('<i class="fa-solid fa-xmark"></i>')
+                        .on('click', async (event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            if (!await Popup.show.confirm('移除正则来源', `这个快照将不再记录${title}，已经选好的规则会丢失。`)) return;
+                            delete sources[key];
+                            snapshot.scopes.regexSources ??= {};
+                            snapshot.scopes.regexSources[key] = false;
+                            snapshot.updatedAt = Date.now();
+                            saveSettingsDebounced();
+                            renderSections();
+                        }));
+                }
+
+                if (!isEditing) {
+                    // Grouped exactly as the editor groups them, so a rule does
+                    // not move between the two views.
+                    const grouped = new Map();
+                    const flat = [];
+                    for (const script of enabled) {
+                        const group = groups.get(String(script.id));
+                        if (!group) { flat.push(script.label || script.id); continue; }
+                        if (!grouped.has(group)) grouped.set(group, []);
+                        grouped.get(group).push(script.label || script.id);
+                    }
+                    if (flat.length || !grouped.size) sourceBody.append(itemList(flat));
+                    for (const [group, labels] of grouped) {
+                        const groupDrawer = makeDrawer('ocs-content-entry-group', group, `${labels.length} 条`);
+                        drawerBody(groupDrawer).append(itemList(labels));
+                        sourceBody.append(groupDrawer);
+                    }
+                    body.append(drawer);
+                    continue;
+                }
+
+                drawer.prop('open', true);
+                if (key !== 'global') {
+                    const ownerRow = regexOwnerRow(key, source, context);
+                    if (ownerRow) sourceBody.append(ownerRow);
+                }
+
+                // Every recorded rule shows in edit mode, not only the enabled
+                // ones: turning one back on is the point of being here.
+                const list = $('<div class="ocs-world-entries is-open"></div>');
+                if (!scripts.length) {
+                    list.append($('<small></small>').text(key === 'global' ? '这一类没有记录规则。' : '先选一个来源，再挑要记录的规则。'));
+                }
+
+                const grouped = new Map();
+                const ungrouped = [];
+                for (const script of scripts) {
+                    const group = groups.get(String(script.id));
+                    if (!group) { ungrouped.push(script); continue; }
+                    if (!grouped.has(group)) grouped.set(group, []);
+                    grouped.get(group).push(script);
+                }
+
+                const scriptToggle = (script, afterChange) => {
+                    const input = $('<input type="checkbox">').prop('checked', script.enabled !== false);
+                    input.on('change', function () {
+                        script.enabled = this.checked;
+                        snapshot.updatedAt = Date.now();
+                        saveSettingsDebounced();
+                        afterChange();
+                    });
+                    return $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(script.label || script.id));
+                };
+                const counters = [];
+                const refresh = () => {
+                    for (const [node, members] of counters) node.text(`${members.filter(script => script.enabled !== false).length} / ${members.length}`);
+                    list.find('.ocs-world-bulk').trigger('ocs:sync');
+                };
+                const groupToggle = (members) => {
+                    const icon = $('<i class="ocs-toggle-icon"></i>');
+                    const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
+                    const sync = () => {
+                        const all = members.length > 0 && members.every(script => script.enabled !== false);
+                        icon.toggleClass('is-on', all);
+                        button.attr('title', all ? '全部关闭' : '全部开启');
+                        return all;
+                    };
+                    sync();
+                    button.on('ocs:sync', sync);
+                    button.on('click', (event) => {
+                        // This sits inside a <summary>, whose default action is
+                        // to open and close the drawer it is in.
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const value = !sync();
+                        for (const script of members) script.enabled = value;
+                        snapshot.updatedAt = Date.now();
+                        saveSettingsDebounced();
+                        renderSections();
+                    });
+                    return button;
+                };
+
+                for (const script of ungrouped) list.append(scriptToggle(script, refresh));
+                for (const [group, members] of grouped) {
+                    const counter = $('<small></small>');
+                    counters.push([counter, members]);
+                    const groupDrawer = $('<details class="ocs-world-entry-group"></details>');
+                    groupDrawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, groupToggle(members)));
+                    const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
+                    for (const script of members) groupBody.append(scriptToggle(script, refresh));
+                    list.append(groupDrawer.append(groupBody));
+                }
+                refresh();
+                sourceBody.append(list);
+                body.append(drawer);
+            }
+            return section;
+        };
+        mount((isEditing) => {
+            if (!snapshot.scopes?.regex) return null;
+            return buildRegexSection(isEditing);
+        }, 'regex');
     }
+    /**
+     * An empty shell for a scope, ready to be filled in by hand.
+     *
+     * Deliberately not a capture of the current state: this page exists to
+     * assemble a snapshot piece by piece, and seeding it from whatever happens
+     * to be loaded would mean deleting someone else's settings before choosing
+     * your own. `api` is the exception -- it has no editor, so there is nothing
+     * to fill in and recording the live connection is the only thing it can do.
+     *
+     * @param {string} key Scope key
+     * @returns {object|null} Payload shell, or null to record from the current state
+     */
+    const emptyScopePayload = (key) => {
+        switch (key) {
+            case 'character':
+            case 'persona':
+                return { versionId: null, versionName: '', data: {} };
+            case 'theme':
+                return { name: '' };
+            case 'worldInfo':
+                return { globalSelected: null, context: {}, books: [] };
+            case 'preset':
+                return { api: main_api, presetValue: null, presetName: '', promptEntries: [], promptGates: [], parameters: null };
+            case 'regex':
+                // Global rules are listed straight away because they have no
+                // owner to pick. The other two stay empty until a character or
+                // a preset is chosen, which is what decides what belongs there.
+                return {
+                    context: {},
+                    sources: {
+                        global: { scripts: getScriptsByType(SCRIPT_TYPES.GLOBAL).map(script => ({ id: script.id, label: script.scriptName || script.id, enabled: false })) },
+                        scoped: { scripts: [], allowed: true },
+                        preset: { scripts: [], allowed: true },
+                    },
+                };
+            default:
+                return null;
+        }
+    };
+
     await showOcsPopup(root);
 }
 
@@ -4728,7 +6366,7 @@ function renderSnapshotCard(root, snapshot) {
     actions.append($('<button class="ocs-button">应用</button>').on('click', async () => {
         if (await applySnapshot(snapshot)) renderSnapshotList(root);
     }));
-    actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot)));
+    actions.append($('<button class="ocs-button">查看内容</button>').on('click', () => showSnapshotContents(snapshot, () => renderSnapshotList(root))));
     actions.append($('<button class="ocs-button">更新</button>').on('click', async () => {
         if (!hasSnapshotScope(snapshot.scopes)) {
             toastr.warning('这个快照没有记录范围，先在上方添加一个。', '一键快照');

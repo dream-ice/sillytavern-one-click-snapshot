@@ -727,8 +727,7 @@ function installPanelChrome() {
     );
 
     $('#user_avatar_block').before(
-        '<div id="ocs_persona_tag_controls" class="rm_tag_controls"><div id="ocs_persona_tag_filter" class="tags"></div></div>' +
-        '<div id="ocs_persona_folders" class="ocs-persona-folders"></div>',
+        '<div id="ocs_persona_tag_controls" class="rm_tag_controls"><div id="ocs_persona_tag_filter" class="tags"></div></div>',
     );
 
     $('#ocs_persona_usage_refresh').on('click', () => void scanUsageCounts().then(refreshList));
@@ -920,14 +919,21 @@ function renderCurrentPersonaRow() {
 }
 
 /**
- * Renders the folder row above the persona list. Folders are deliberately not
- * part of the paginated card list: mixing them in is what made page counts and
- * "back" navigation inconsistent.
+ * Renders the folders at the top of the persona list.
+ *
+ * Placed *inside* `#user_avatar_block`, like the pinned cards and like the
+ * character list puts its folders in with the characters. A container of its
+ * own is a separate flex context, so the folders could never share a wrapping
+ * row with the cards and always broke onto a line by themselves.
+ *
+ * They are still not part of the paginated data: mixing them into the card list
+ * is what made page counts and "back" navigation inconsistent.
  */
 function renderFolderRow() {
-    const row = $('#ocs_persona_folders');
+    const row = $('#user_avatar_block');
     if (!row.length) return;
-    row.empty();
+    row.find('.ocs_persona_folder, #ocs_persona_folder_back').remove();
+    if (!managerEnabled) return;
 
     if (folderTagId) {
         const tag = tags.find(item => item.id === folderTagId);
@@ -938,13 +944,14 @@ function renderFolderRow() {
             folderTagId = null;
             refreshFilterUi();
         });
-        row.append(back);
+        row.prepend(back);
         return;
     }
 
     if (folderFilter === FILTER_STATE.EXCLUDED) return;
 
     const personaIds = knownPersonaIds();
+    const blocks = [];
     for (const tag of folderTags()) {
         const members = personaIds.filter(avatarId => personaTagIds(avatarId).includes(tag.id));
         if (!members.length) continue;
@@ -963,8 +970,11 @@ function renderFolderRow() {
             folderFilter = FILTER_STATE.UNDEFINED;
             refreshFilterUi();
         });
-        row.append(block);
+        blocks.push(block);
     }
+    // Prepended in one go and in order: prepending each in turn would reverse
+    // them, and they have to sit above the pinned row that ran before this.
+    if (blocks.length) row.prepend(...blocks);
 }
 
 /**
@@ -1006,7 +1016,6 @@ function decorateCards() {
     }
 
     list.toggleClass('ocs-persona-bulk-mode', bulkMode);
-    $('#ocs_persona_folders').toggleClass('ocs-persona-bulk-mode', bulkMode);
     pruneOrphanedMeta();
 
     // Add the pinned card first so the pass below decorates it like any other.
@@ -1642,7 +1651,7 @@ function refreshDetailPane() {
  */
 export function setPersonaManagerEnabled(enabled) {
     managerEnabled = Boolean(enabled);
-    $('#ocs_persona_tag_controls, #ocs_persona_folders, #ocs_persona_usage_refresh, #ocs_persona_bulk_edit, #ocs_persona_tags, #ocs_persona_favorite').toggle(managerEnabled);
+    $('#ocs_persona_tag_controls, #ocs_persona_usage_refresh, #ocs_persona_bulk_edit, #ocs_persona_tags, #ocs_persona_favorite').toggle(managerEnabled);
     // Also resets a stored order of ours, which would otherwise leave the list
     // unsorted once our comparator stops running.
     syncSortOrders();

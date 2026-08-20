@@ -44,6 +44,11 @@ export const FEATURES = [
         note: '把当前的角色、用户、预设、世界书、正则等状态整套存下来，之后一键还原。',
         children: [
             {
+                key: 'snapshot.contentEditor',
+                label: '在快照内容里修改',
+                note: '「查看内容」页多一个「修改」按钮，可以直接改这个快照记录了什么——换世界书、换版本、换预设、挑正则规则，也能增删范围。\n\n改的只是快照本身，不会动你当前正在用的状态，所以在玩着别的角色时也能整理快照。',
+            },
+            {
                 key: 'snapshot.askScope',
                 label: '更新时询问范围',
                 note: '更新时先让你挑这次要刷新哪些范围，没挑的保持原样。\n\n用来只更新快照里的一部分——比如快照存了世界书和预设，你只想把世界书换成现在的，预设照旧。',
@@ -265,12 +270,13 @@ function renderFeature(node) {
     const text = $('<span class="ocs-feat-text"></span>');
     text.append(renderLabel(node, 'ocs-feat-name'));
 
-    // A track-and-thumb switch for the master, plain checkboxes for the
-    // sub-settings: the shape difference carries the hierarchy on its own,
+    // The same toggle icon SillyTavern uses on preset prompt entries, so a
+    // switch looks like a switch everywhere. Sub-settings stay plain
+    // checkboxes: the shape difference carries the hierarchy on its own,
     // without needing headings or boxes.
     const control = $('<span class="ocs-switch"></span>');
     const input = $('<input type="checkbox">').attr('id', inputId(node.key)).prop('checked', enabled);
-    control.append(input, '<span class="ocs-switch-track"><span class="ocs-switch-thumb"></span></span>');
+    control.append(input, '<i class="ocs-toggle-icon"></i>');
     head.append(text, control);
     block.append(head);
 
