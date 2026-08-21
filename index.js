@@ -932,8 +932,13 @@ function presetParametersOf(preset) {
     if (!preset || typeof preset !== 'object') return null;
     const parameters = {};
     for (const key of PRESET_PARAMETER_KEYS) {
+        // A preset file stores the parameter under its own name; only the live
+        // settings object renames it (`temperature` becomes `temp_openai`).
+        // Reading by the settings name alone finds just the handful where the
+        // two happen to coincide.
         const setting = settingsToUpdate[key]?.[1];
-        if (setting && Object.hasOwn(preset, setting)) parameters[key] = deepClone(preset[setting]);
+        if (Object.hasOwn(preset, key)) parameters[key] = deepClone(preset[key]);
+        else if (setting && Object.hasOwn(preset, setting)) parameters[key] = deepClone(preset[setting]);
     }
     return Object.keys(parameters).length ? parameters : null;
 }
@@ -4849,6 +4854,37 @@ function worldEditScope(snapshot) {
 }
 
 /**
+ * Preset-transfer's own grouping of the worldbook list, in its display order.
+ *
+ * Its `flat` view is the plain list grouping, stored as `order: ['g:名称', ...]`
+ * alongside `groups: {名称: [书名, ...]}`. Only the display is borrowed: which
+ * slot a book is recorded under still follows its actual binding.
+ *
+ * @returns {{label: string, names: string[]}[]} Groups in order, or empty
+ */
+function ptWorldGroupOrder() {
+    const state = getPresetTransferSettings()?.worldbookGroupingState?.flat;
+    const groups = state?.groups;
+    if (!groups || typeof groups !== 'object') return [];
+
+    const seen = new Set();
+    const result = [];
+    for (const token of Array.isArray(state.order) ? state.order : []) {
+        if (!String(token).startsWith('g:')) continue;
+        const label = String(token).slice(2);
+        if (seen.has(label) || !Array.isArray(groups[label])) continue;
+        seen.add(label);
+        result.push({ label, names: groups[label].map(String) });
+    }
+    // Groups the order never mentioned still belong in the list.
+    for (const [label, names] of Object.entries(groups)) {
+        if (seen.has(label) || !Array.isArray(names)) continue;
+        result.push({ label, names: names.map(String) });
+    }
+    return result;
+}
+
+/**
  * The books that may still be added, grouped by the slot they would occupy.
  *
  * Each slot lists only books that genuinely belong to it, so picking from a
@@ -5009,9 +5045,14 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
         // Re-read on demand rather than captured: single entries are toggled
         // without a rebuild, and a captured value would go stale under them.
+        // On when anything inside is on, off only when everything is -- the
+        // same reading as the grouping extensions' own group switches. Clicking
+        // therefore means "turn the rest on" or, when already fully on, "turn
+        // it all off".
         const sync = () => {
+            const any = entries.some(entry => entry.enabled !== false);
             const all = entries.length > 0 && entries.every(entry => entry.enabled !== false);
-            icon.toggleClass('is-on', all);
+            icon.toggleClass('is-on', any);
             button.attr('title', all ? '全部关闭' : '全部开启');
             return all;
         };
@@ -5153,6 +5194,28 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         const opener = $('<button type="button" class="ocs-button ocs-world-add-open"><i class="fa-solid fa-plus"></i> 添加世界书</button>')
             .on('click', () => panel.toggleClass('is-open'));
 
+        // A filter over the whole panel: the global group alone can run to
+        // hundreds of books, and scrolling a collapsed list to find one is the
+        // slow way round.
+        const search = $('<input class="text_pole ocs-world-add-search" type="search" placeholder="搜索世界书名称">');
+        search.on('input', function () {
+            const needle = String(this.value).trim().toLowerCase();
+            for (const node of panel.children('.ocs-world-add-group')) {
+                const group = $(node);
+                let shown = 0;
+                for (const item of group.find('.ocs-world-add-item')) {
+                    const hit = !needle || String($(item).text()).toLowerCase().includes(needle);
+                    $(item).toggleClass('is-hidden', !hit);
+                    if (hit) shown += 1;
+                }
+                group.toggleClass('is-hidden', shown === 0);
+                // Opened while filtering so hits are visible without a second
+                // click, and left as the user had it once the box is cleared.
+                if (needle) group.prop('open', true);
+            }
+        });
+        panel.append(search);
+
         const pick = async (slot, name) => {
             const conflict = worldOwnerConflict(state, name, slot);
             if (conflict) return toastr.warning(conflict, '一键快照');
@@ -5162,18 +5225,52 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
             commit(true);
         };
 
+        const addItem = (slot, option) => $('<button type="button" class="ocs-world-add-item"></button>')
+            .text(option.label)
+            .on('click', () => void pick(slot, option.name));
+
+        const groupDrawer = (label, count, hint = '') => {
+            const heading = $('<b></b>').text(label);
+            // Inside the <b> so it stays beside the name: the heading carries
+            // `margin-right: auto` and pushes anything after it to the far end.
+            if (hint) heading.append($('<small class="ocs-world-owner"></small>').text(`（${hint}）`));
+            return $('<details class="ocs-world-add-group"></details>')
+                .append($('<summary></summary>').append(heading, $('<small></small>').text(`${count} 本`)));
+        };
+
+        // Preset-transfer's grouping is borrowed for the global slot only. The
+        // other four name a binding and hold a book or two each; the global
+        // list is the long one, and the one that grouping was set up for.
+        // Nothing about what gets recorded changes -- the slot still comes from
+        // the book's own binding.
+        const ptGroups = feature('snapshot.contentEditorPtWorldGroups') ? ptWorldGroupOrder() : [];
+
         for (const [slot, options] of candidates) {
             if (!options.length) continue;
-            const drawer = $('<details class="ocs-world-add-group"></details>');
-            drawer.append($('<summary></summary>').append(
-                $('<b></b>').text(slot),
-                $('<small></small>').text(`${options.length} 本`),
-            ));
+            const isGlobal = slot === WORLD_SLOT_ORDER[0];
+            const drawer = groupDrawer(slot, options.length, isGlobal ? '未归属' : '');
             const groupBody = $('<div class="ocs-world-add-group-body"></div>');
-            for (const option of options) {
-                groupBody.append($('<button type="button" class="ocs-world-add-item"></button>')
-                    .text(option.label)
-                    .on('click', () => void pick(slot, option.name)));
+
+            if (isGlobal && ptGroups.length) {
+                const placed = new Set();
+                for (const group of ptGroups) {
+                    const members = options.filter(option => group.names.includes(option.name));
+                    if (!members.length) continue;
+                    members.forEach(option => placed.add(option));
+                    const sub = groupDrawer(group.label, members.length);
+                    const subBody = $('<div class="ocs-world-add-group-body"></div>');
+                    for (const option of members) subBody.append(addItem(slot, option));
+                    groupBody.append(sub.append(subBody));
+                }
+                const rest = options.filter(option => !placed.has(option));
+                if (rest.length) {
+                    const sub = groupDrawer('未分组', rest.length);
+                    const subBody = $('<div class="ocs-world-add-group-body"></div>');
+                    for (const option of rest) subBody.append(addItem(slot, option));
+                    groupBody.append(sub.append(subBody));
+                }
+            } else {
+                for (const option of options) groupBody.append(addItem(slot, option));
             }
             panel.append(drawer.append(groupBody));
         }
@@ -5334,6 +5431,9 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
     // Edit mode belongs to the page rather than to one section, so the sections
     // that become editable later join it without growing a button each.
     let editing = false;
+    // Closing the popup mid-edit means the same as cancelling: nothing was
+    // confirmed, so nothing should stick. Set once edit mode exists.
+    let discardEdits = () => {};
 
     /**
      * Sections that swap between a read-only and an editable rendering.
@@ -5478,19 +5578,33 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             onChange();
         };
 
+        /** Puts everything back the way it was on entering edit mode. */
+        const revert = () => {
+            if (!restorePoint) return false;
+            // Restored into the existing object rather than replacing it:
+            // every section holds a reference to this one, and swapping it out
+            // would leave them all editing something detached.
+            for (const key of Object.keys(payload)) delete payload[key];
+            Object.assign(payload, deepClone(restorePoint.payload));
+            snapshot.scopes = deepClone(restorePoint.scopes);
+            snapshot.updatedAt = restorePoint.updatedAt;
+            saveSettingsDebounced();
+            return true;
+        };
+
         cancel.on('click', () => {
-            if (restorePoint) {
-                // Restored into the existing object rather than replacing it:
-                // every section holds a reference to this one, and swapping it
-                // out would leave them all editing something detached.
-                for (const key of Object.keys(payload)) delete payload[key];
-                Object.assign(payload, deepClone(restorePoint.payload));
-                snapshot.scopes = deepClone(restorePoint.scopes);
-                snapshot.updatedAt = restorePoint.updatedAt;
-                saveSettingsDebounced();
-            }
+            revert();
             leave();
         });
+
+        discardEdits = () => {
+            if (!editing) return;
+            // Not `leave()`: the popup is already gone, so there is nothing to
+            // redraw, and any "create a version on finish" choice must not be
+            // acted on either.
+            editing = false;
+            if (revert()) onChange();
+        };
 
         toggle.on('click', async () => {
             if (editing) return leave();
@@ -5564,20 +5678,38 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         .find('span').text(title).end()
         .find('strong').text(text).end();
 
+    /**
+     * A labelled dropdown. `options` may be a flat list, or `{label, options}`
+     * groups which render as `<optgroup>`.
+     */
     const selectRow = (title, options, current, onPick) => {
         const row = $('<div class="ocs-version-value"></div>').append($('<span></span>').text(title));
         const select = $('<select class="text_pole ocs-content-select"></select>');
+        const groups = options.length && Array.isArray(options[0]?.options) ? options : [{ label: '', options }];
+        const flat = groups.flatMap(group => group.options);
+
+        // A scope that holds nothing yet starts genuinely unset. Without this
+        // the dropdown shows whichever option sorts first while the snapshot
+        // still holds nothing, and no change event ever fires to load it in.
+        if (!current) select.append($('<option value="">请选择…</option>'));
         // A recorded value that no longer exists is kept as its own option, or
-        // `val()` would silently fall through to whatever sorts first and read
-        // as a change the user never made.
-        const known = options.some(option => option.value === current);
-        if (!known && current) select.append($('<option></option>').val(current).text(`${current}（已删除）`));
-        for (const option of options) select.append($('<option></option>').val(option.value).text(option.label));
-        select.val(current);
-        select.on('change', function () { onPick(String(this.value)); });
+        // `val()` would silently fall through to the first one and read as a
+        // change the user never made.
+        else if (!flat.some(option => option.value === current)) select.append($('<option></option>').val(current).text(`${current}（已删除）`));
+
+        for (const group of groups) {
+            const target = group.label ? $('<optgroup></optgroup>').attr('label', group.label).appendTo(select) : select;
+            for (const option of group.options) target.append($('<option></option>').val(option.value).text(option.label));
+        }
+        select.val(current || '');
+        select.on('change', function () {
+            if (!this.value) return;
+            onPick(String(this.value));
+        });
         return row.append(select);
     };
 
+    /** Every preset name, in the order the preset manager lists them. */
     /** Two dropdowns on one row: pick the owner, then one of its versions. */
     const twoStepRow = (title, owners, currentOwner, currentValue, onPick) => {
         const row = $('<div class="ocs-version-value ocs-version-pick"></div>').append($('<span></span>').text(title));
@@ -5621,6 +5753,13 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         valueSelect.on('change', function () { onPick(String(ownerSelect.val() ?? ''), String(this.value)); });
 
         return row.append(pair.append(ownerSelect, valueSelect));
+    };
+
+    const presetOptions = () => {
+        const { preset_names: names } = getPresetManager()?.getPresetList?.() ?? {};
+        return (Array.isArray(names) ? names : Object.keys(names ?? {}))
+            .filter(Boolean)
+            .map(name => ({ value: name, label: name }));
     };
 
     const mountVersion = (scope, title, store, fallback, nameOf) => {
@@ -5806,8 +5945,6 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         const buildPresetEditor = () => {
             const state = payload.preset ??= { api: main_api, presetName: '', promptEntries: [], parameters: null };
             const manager = getPresetManager();
-            const { preset_names: names } = manager?.getPresetList?.() ?? {};
-            const available = Array.isArray(names) ? names : Object.keys(names ?? {});
             const selectedPreset = manager?.getCompletionPresetByName?.(state.presetName);
 
             const section = $('<details class="ocs-content-drawer ocs-content-section ocs-content-preset" open></details>');
@@ -5817,7 +5954,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             );
             const body = section.children('.ocs-content-drawer-body');
 
-            body.append(selectRow('预设', available.map(name => ({ value: name, label: name })), state.presetName ?? '', (value) => {
+            body.append(selectRow('预设', presetOptions(), state.presetName ?? '', (value) => {
                 const preset = manager?.getCompletionPresetByName?.(value);
                 if (!preset) return toastr.warning('读不到这个预设的内容。', '一键快照');
                 const labels = new Map((preset.prompts ?? []).map(prompt => [prompt.identifier, prompt.name || prompt.identifier]));
@@ -5901,15 +6038,6 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             const list = $('<div class="ocs-world-entries is-open"></div>');
             if (!entries.length) list.append($('<small></small>').text('这个预设没有可记录的条目。'));
 
-            const grouped = new Map();
-            const ungrouped = [];
-            for (const entry of entries) {
-                const group = groupOf(entry);
-                if (!group) { ungrouped.push(entry); continue; }
-                if (!grouped.has(group)) grouped.set(group, []);
-                grouped.get(group).push(entry);
-            }
-
             const counters = [];
             const refresh = () => {
                 for (const [node, members] of counters) node.text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
@@ -5920,8 +6048,9 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 const icon = $('<i class="ocs-toggle-icon"></i>');
                 const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
                 const sync = () => {
+                    const any = members.some(entry => entry.enabled !== false);
                     const all = members.length > 0 && members.every(entry => entry.enabled !== false);
-                    icon.toggleClass('is-on', all);
+                    icon.toggleClass('is-on', any);
                     button.attr('title', all ? '全部关闭' : '全部开启');
                     return all;
                 };
@@ -5939,15 +6068,30 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 return button;
             };
 
-            for (const entry of ungrouped) list.append(entryToggle(entry, refresh));
-            for (const [group, members] of grouped) {
-                const counter = $('<small></small>');
-                counters.push([counter, members]);
-                const drawer = $('<details class="ocs-world-entry-group"></details>');
-                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulk(members)));
-                const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
-                for (const entry of members) groupBody.append(entryToggle(entry, refresh));
-                list.append(drawer.append(groupBody));
+            // Walked in the preset's own order, with each group's drawer placed
+            // where its first member falls. Collecting the ungrouped entries
+            // separately would hoist them above every group, so the list would
+            // stop matching what the prompt manager shows.
+            const drawers = new Map();
+            for (const entry of entries) {
+                const group = groupOf(entry);
+                if (!group) {
+                    list.append(entryToggle(entry, refresh));
+                    continue;
+                }
+                let body = drawers.get(group);
+                if (!body) {
+                    const members = entries.filter(item => groupOf(item) === group);
+                    const counter = $('<small></small>');
+                    counters.push([counter, members]);
+                    body = $('<div class="ocs-world-entry-group-body"></div>');
+                    drawers.set(group, body);
+                    list.append($('<details class="ocs-world-entry-group"></details>').append(
+                        $('<summary></summary>').append($('<b></b>').text(group), counter, bulk(members)),
+                        body,
+                    ));
+                }
+                body.append(entryToggle(entry, refresh));
             }
             refresh();
             entriesBody.append(list);
@@ -6003,8 +6147,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 });
             }
 
-            const { preset_names: names } = getPresetManager()?.getPresetList?.() ?? {};
-            const owners = (Array.isArray(names) ? names : Object.keys(names ?? {})).map(name => ({ value: name, label: name }));
+            const owners = presetOptions();
             if (!owners.length) return null;
             return selectRow('预设', owners, context.presetName ?? '', (value) => {
                 context.presetName = value;
@@ -6164,8 +6307,9 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                     const icon = $('<i class="ocs-toggle-icon"></i>');
                     const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
                     const sync = () => {
+                        const any = members.some(script => script.enabled !== false);
                         const all = members.length > 0 && members.every(script => script.enabled !== false);
-                        icon.toggleClass('is-on', all);
+                        icon.toggleClass('is-on', any);
                         button.attr('title', all ? '全部关闭' : '全部开启');
                         return all;
                     };
@@ -6247,6 +6391,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
     };
 
     await showOcsPopup(root);
+    discardEdits();
 }
 
 /** Per-page choices for the snapshot library, mirroring SillyTavern's lists. */

@@ -253,7 +253,13 @@
 .ocs-world-add-panel { display: none; gap: 2px; margin-top: 7px; }
 .ocs-world-add-panel.is-open { display: grid; grid-template-columns: minmax(0, 1fr); }
 /* Capped and scrollable: the global group lists every lorebook on the server. */
+/* A nested group inside the global list: no scroll cap of its own, the outer
+   body already provides one, and a second would trap the inner list. */
+.ocs-world-add-group-body .ocs-world-add-group-body { max-height: none; overflow: visible; }
 .ocs-world-add-group-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1px; max-height: 210px; margin-left: 3px; padding-left: 6px; overflow-y: auto; border-left: 1px dashed color-mix(in srgb, var(--SmartThemeBodyColor, currentColor) 20%, transparent); }
+.ocs-contents-popup input.ocs-world-add-search { box-sizing: border-box; width: 100%; min-width: 0; min-height: 30px; margin-bottom: 4px; font-size: .86em; }
+.ocs-world-add-item.is-hidden,
+.ocs-world-add-group.is-hidden { display: none; }
 .ocs-world-add-item { padding: 4px 7px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: .84em; text-align: left; }
 .ocs-world-add-item:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 20%, transparent); color: var(--SmartThemeQuoteColor, #9cc); }
 

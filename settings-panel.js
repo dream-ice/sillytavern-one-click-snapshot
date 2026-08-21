@@ -47,6 +47,14 @@ export const FEATURES = [
                 key: 'snapshot.contentEditor',
                 label: '在快照内容里修改',
                 note: '「查看内容」页多一个「修改」按钮，可以直接改这个快照记录了什么——换世界书、换版本、换预设、挑正则规则，也能增删范围。\n\n改的只是快照本身，不会动你当前正在用的状态，所以在玩着别的角色时也能整理快照。',
+                children: [
+                    {
+                        key: 'snapshot.contentEditorPtWorldGroups',
+                        label: '全局世界书按预设转移的分组显示',
+                        note: '「添加世界书」里的全局世界书改用预设转移那套分组来分类，和你在世界书列表里看到的一致。\n\n只影响全局这一栏，也只影响怎么显示——角色主、附加、用户、聊天四栏本来就只有各自绑定的那一两本，不受影响；记成哪一类仍然按这本书实际的绑定来定。',
+                        default: false,
+                    },
+                ],
             },
             {
                 key: 'snapshot.askScope',
