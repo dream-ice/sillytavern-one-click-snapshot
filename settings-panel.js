@@ -316,7 +316,10 @@ function renderFeature(node) {
  * entry and its open/close is handled by SillyTavern's delegated handler.
  */
 export function installFeatureSettings() {
-    const host = $('#extensions_settings2');
+    // First column. SillyTavern splits the Extensions page into
+    // `#extensions_settings` and `#extensions_settings2`; the second is where
+    // most third-party blocks pile up, so this one is the shorter read.
+    const host = $('#extensions_settings');
     if (!host.length) return;
 
     if (!$('#ocs_feature_settings').length) {
