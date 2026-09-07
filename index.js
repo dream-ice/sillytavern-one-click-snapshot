@@ -1679,7 +1679,6 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
         // sentinel avoids it trying to read args.silent from undefined.
         onWorldInfoChange('__notSlashCommand__');
     }
-    let warnedAboutPtGate = false;
     for (const book of state.books ?? []) {
         const sources = Array.isArray(book.sources) ? book.sources : [];
         // A book can be mounted from several places. Keep it when at least
@@ -1729,16 +1728,16 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
                 // before touching individual entry switches so we never write
                 // a stale, grouping-less object back over it.
                 data = await loadWorldInfo(book.name);
-            } else {
-                // A closed gate exists but the setter is not there to move it.
-                // Those groups are left exactly as they are: preserving a gate
-                // the user set is safer than flattening it. Only the affected
-                // groups are skipped, never every grouped entry.
-                if (!warnedAboutPtGate) {
-                    toastr.warning('预设转移的分组开关尚未就绪，已跳过被关闭的分组以保护它们的状态。', '一键快照');
-                    warnedAboutPtGate = true;
-                }
             }
+            // Deliberately silent, and deliberately does nothing else. The
+            // snapshot recorded a closed gate but there is no setter to move
+            // one; entry switches are still restored as normal, and the only
+            // groups left alone are those closed in the user's own library
+            // right now, which `protectedUids` already covers. Warning here
+            // would name a group switch to someone whose build of
+            // preset-transfer has none, reading as a fault in this extension
+            // rather than as the no-op it is.
+            else console.debug('[One-click Snapshot] no worldbook group gate setter; gates left as they are', book.name);
         }
         if (!data?.entries) continue;
         let changed = false;
