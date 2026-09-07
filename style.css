@@ -196,7 +196,14 @@
 /* Toggle icon, the same one SillyTavern draws on preset prompt entries, so a
    list of switches reads identically in both places. The real checkbox stays
    for keyboard and screen readers and is only visually hidden. */
-.ocs-toggle-icon { flex: 0 0 auto; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-style: normal; font-size: 1.06em; line-height: 1; opacity: .5; }
+/* `pointer-events: none` is load-bearing, not tidiness. The icon is purely
+   decorative -- the input or the button behind it takes the click -- and its
+   `opacity: .5` creates a stacking context, which lifts it into the same paint
+   layer as the absolutely positioned input and, being later in the DOM, on top
+   of it. The switch would then refuse to turn back on: while off the icon is
+   translucent and swallows the click, while on it is `opacity: 1`, forms no
+   stacking context, and the input covers it again. */
+.ocs-toggle-icon { flex: 0 0 auto; pointer-events: none; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-style: normal; font-size: 1.06em; line-height: 1; opacity: .5; }
 .ocs-toggle-icon::before { content: '\f204'; }
 /* `is-on` is for toggles with no checkbox behind them, such as the bulk one. */
 :checked ~ .ocs-toggle-icon,
@@ -749,7 +756,7 @@ body.rounded-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav
    control and stays invisible: it remains the thing that is clicked and
    focused, while the icon beside it is what is seen. */
 .ocs-switch { position: relative; flex: 0 0 auto; display: inline-flex; align-items: center; font-size: 1.24em; }
-.ocs-switch input { position: absolute; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.ocs-switch input { position: absolute; z-index: 1; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .ocs-switch:focus-within { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 2px; border-radius: 4px; }
 
 /* Sub-settings exist only while the parent is on; collapsed they take no room
