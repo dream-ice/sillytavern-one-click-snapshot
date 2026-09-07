@@ -594,12 +594,17 @@
     border-radius: inherit;
     pointer-events: none;
 }
-/* `inherit` covers the round default, but the avatar-shape settings put their
-   radius on `.avatar` with `!important` from a body class, and a theme may set
-   it somewhere the pseudo-element does not follow. Stating the two non-round
-   shapes explicitly keeps the ring the same shape as the avatar it draws on. */
+/* `inherit` covers the round default, but each avatar-shape setting puts its
+   radius somewhere the pseudo-element does not reliably follow -- sometimes on
+   `.avatar`, sometimes on the `img` inside it. All three non-round shapes are
+   therefore stated here, each with the expression SillyTavern uses for that
+   mode, so the ring matches the avatar it is drawn on.
+   `big-avatars` is the rectangular setting; it is the default for anyone who
+   picked anything other than round, and leaving it out is what kept the ring
+   circular around a rectangular avatar. */
 body.square-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after { border-radius: var(--avatar-base-border-radius); }
 body.rounded-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after { border-radius: var(--avatar-base-border-radius-rounded); }
+body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .avatar::after { border-radius: calc(var(--avatar-base-border-radius) * var(--big-avatar-border-factor)); }
 
 /* Bulk mode mirrors the native character list (`group_overlay_mode_select`):
    a flat grey wash over every card, the theme quote color for the selected
