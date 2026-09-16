@@ -21,7 +21,7 @@ import {
 } from '../../../../script.js';
 import { extension_settings, saveMetadataDebounced } from '../../../extensions.js';
 import { accountStorage } from '../../../util/AccountStorage.js';
-import { getWorldInfoSettings, loadWorldInfo, onWorldInfoChange, saveWorldInfo, world_names } from '../../../world-info.js';
+import { getWorldInfoSettings, loadWorldInfo, onWorldInfoChange, saveWorldInfo, setWIOriginalDataValue, world_names } from '../../../world-info.js';
 import { PAGINATION_TEMPLATE, getCharaFilename, getSortableDelay, localizePagination, paginationDropdownChangeHandler, renderPaginationDropdown } from '../../../utils.js';
 import { getPresetManager } from '../../../preset-manager.js';
 import { power_user } from '../../../power-user.js';
@@ -802,6 +802,50 @@ function getPresetPromptGroups(settings, preset = null) {
 }
 
 /**
+ * The three activation strategies an entry can have, as SillyTavern's own
+ * selector names them: 🔵 constant, 🟢 normal (keyword), 🔗 vectorized.
+ */
+const WORLD_ENTRY_STRATEGIES = {
+    constant: { icon: '🔵', label: '常驻' },
+    normal: { icon: '🟢', label: '关键词触发' },
+    vectorized: { icon: '🔗', label: '向量化' },
+};
+
+/** Reads an entry's strategy the way the native selector does. */
+function worldEntryStrategy(entry) {
+    return entry?.constant === true ? 'constant' : entry?.vectorized === true ? 'vectorized' : 'normal';
+}
+
+/**
+ * Writes a strategy onto a loaded lorebook entry.
+ *
+ * Mirrors the native selector's handler exactly, including the copy kept in
+ * `originalData` -- skipping that would leave an exported book disagreeing
+ * with what the editor shows.
+ *
+ * @param {object} data Loaded lorebook
+ * @param {string} uid Entry uid
+ * @param {string} strategy One of the WORLD_ENTRY_STRATEGIES keys
+ * @returns {boolean} Whether anything changed
+ */
+function setWorldEntryStrategy(data, uid, strategy) {
+    const entry = data?.entries?.[uid];
+    if (!entry || !Object.hasOwn(WORLD_ENTRY_STRATEGIES, strategy) || worldEntryStrategy(entry) === strategy) return false;
+    const constant = strategy === 'constant';
+    const vectorized = strategy === 'vectorized';
+    entry.constant = constant;
+    entry.vectorized = vectorized;
+    // The entry's own uid, not the key it was looked up by. Snapshots store
+    // uids as strings, the helper matches `originalData` with `===`, and uids
+    // there are numbers -- passing the string would match nothing and leave
+    // the export copy silently out of date.
+    const originalUid = entry.uid ?? uid;
+    setWIOriginalDataValue(data, originalUid, 'constant', constant);
+    setWIOriginalDataValue(data, originalUid, 'extensions.vectorized', vectorized);
+    return true;
+}
+
+/**
  * Reads one lorebook into the shape a snapshot stores.
  *
  * The read is by name and goes straight to the file, so it neither depends on
@@ -834,6 +878,10 @@ async function captureWorldBook(descriptor, groups = null) {
             // a lossless restore of a group that is currently gated off.
             enabled: !entry.disable && !gatedOffUids.has(String(uid)),
             rawEnabled: !entry.disable,
+            // Always recorded, whatever the setting says. Recording changes
+            // nothing, and gating it would let an ordinary refresh with the
+            // setting off wipe out strategies the user had already captured.
+            strategy: worldEntryStrategy(entry),
             group: String(entry.group ?? '').trim(),
             ptGroup: ptGroups.get(String(uid)) ?? '',
         })),
@@ -1672,6 +1720,8 @@ async function applyPersona(state, versionId = null) {
 
 async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
     if (!state) return;
+    // Read once per apply rather than per entry.
+    const restoreStrategies = feature('snapshot.worldEntryStrategy');
     if (Array.isArray(state.globalSelected)) {
         const chosen = state.globalSelected.filter(name => world_names.includes(name));
         $('#world_info').val(chosen.map(name => String(world_names.indexOf(name))));
@@ -1752,6 +1802,9 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
                 entry.disable = !desiredEnabled;
                 changed = true;
             }
+            // Only snapshots that recorded a strategy carry one; older ones
+            // leave the entry's current light exactly as it is.
+            if (restoreStrategies && saved.strategy && setWorldEntryStrategy(data, saved.uid, saved.strategy)) changed = true;
         }
         if (changed) await saveWorldInfo(book.name, data, true);
     }
@@ -5022,6 +5075,8 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
      * The checkbox stays for keyboard and screen readers; the icon is the
      * visible part, swapped by CSS on `:checked`.
      */
+    const showStrategy = feature('snapshot.worldEntryStrategy');
+
     const entrySwitch = (entry, afterChange) => {
         const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
         input.on('change', function () {
@@ -5032,7 +5087,31 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
             entry.rawEnabled = this.checked;
             afterChange();
         });
-        return $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
+        const toggle = $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
+        if (!showStrategy) return toggle;
+
+        // Beside the label rather than inside it: a label forwards clicks to
+        // its control, and a <select> nested in one is not reliably left alone
+        // by every mobile browser.
+        const strategy = $('<select class="ocs-world-strategy"></select>');
+        // A book captured before strategies were recorded has none. Saying so
+        // is more honest than guessing, and leaving it unset means applying
+        // the snapshot will not touch that entry's light.
+        if (!entry.strategy) strategy.append('<option value="" title="未记录">—</option>');
+        for (const [value, meta] of Object.entries(WORLD_ENTRY_STRATEGIES)) {
+            strategy.append($('<option></option>').val(value).text(meta.icon).attr('title', meta.label));
+        }
+        strategy.val(entry.strategy ?? '');
+        strategy.attr('title', WORLD_ENTRY_STRATEGIES[entry.strategy]?.label ?? '未记录');
+        strategy.on('change', function () {
+            if (!this.value) return;
+            entry.strategy = String(this.value);
+            // The unset option has served its purpose once something is picked.
+            $(this).find('option[value=""]').remove();
+            $(this).attr('title', WORLD_ENTRY_STRATEGIES[entry.strategy]?.label ?? '');
+            afterChange();
+        });
+        return $('<div class="ocs-world-entry-row"></div>').append(strategy, toggle);
     };
 
     /**
@@ -5645,11 +5724,18 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         const body = drawerBody(bookNode);
         const groups = new Map();
         const ungrouped = [];
+        // Prefixed with the recorded light only while the setting is on, so a
+        // user who never uses it does not get a column of emoji.
+        const showStrategy = feature('snapshot.worldEntryStrategy');
+        const text = entry => {
+            const icon = showStrategy ? WORLD_ENTRY_STRATEGIES[entry.strategy]?.icon : '';
+            return icon ? `${icon} ${entry.label}` : entry.label;
+        };
         for (const entry of entries) {
             const group = entry.ptGroup || livePtGroups.get(String(entry.uid)) || entry.group || '';
-            if (!group) { ungrouped.push(entry.label); continue; }
+            if (!group) { ungrouped.push(text(entry)); continue; }
             if (!groups.has(group)) groups.set(group, []);
-            groups.get(group).push(entry.label);
+            groups.get(group).push(text(entry));
         }
         // Unnamed entries stay as a flat list in their saved order. Named
         // groups remain collapsible so a lorebook with many entries is tidy.
