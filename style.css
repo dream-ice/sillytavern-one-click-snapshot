@@ -21,12 +21,18 @@
 .ocs-popup-header,
 .ocs-version-popup > header,
 .ocs-contents-popup > header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
     margin: 0 0 14px;
     padding: 0 0 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor, #777);
+}
+/* Only this one is a row, to seat the edit controls beside the kicker. The
+   version library's header holds three siblings -- kicker, title and a
+   paragraph of help -- and laying those out in a row squeezes the title into
+   two lines and drags the paragraph up next to it. */
+.ocs-contents-popup > header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 /* Drop control on a section, matching the badge remove on the cards. */
 .ocs-content-scope-remove { display: inline-grid; place-items: center; flex: 0 0 auto; width: 20px; height: 20px; margin-left: 4px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font-size: .74em; line-height: 1; opacity: .55; }
@@ -396,7 +402,10 @@
 .ocs-content-items li { min-width: 0; padding: 4px 7px; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ocs-content-items .ocs-content-empty { opacity: .65; font-style: italic; }
 
-.ocs-version-popup { max-width: 720px; }
+/* Fills the dialog like the snapshot library does. The old 720px cap was set
+   when this popup was a plain list; it now carries a toolbar, pagination and
+   sorting, and the cap left a wide empty gutter down the right. */
+.ocs-version-popup { width: 100%; max-width: none; }
 .ocs-version-switch-popup { width: min(420px, 100%); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
 .ocs-version-switch-popup header { margin: 0 0 11px; padding-bottom: 9px; border-bottom: 1px solid var(--SmartThemeBorderColor, #777); }
 .ocs-version-switch-popup h3 { margin: 3px 0 0; font-size: 1.18em; }
@@ -635,7 +644,6 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
 
 /* `.title_restorable` is `justify-content: space-between`, which flings the
    maximize button to the far right of the label. Keep it beside the text. */
-.ocs-regex-label.title_restorable { justify-content: flex-start; gap: 8px; }
 
 @media (max-width: 700px) {
     /* Same approach as Timeline Memory: only neutralize the wide popup's
@@ -824,3 +832,14 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
     .ocs-scope-picker { width: 100%; max-width: 100%; }
     .ocs-scope-picker-grid { grid-template-columns: 1fr; }
 }
+
+/* Swipe picker: greeting names beside the swipe numbers, and a dropdown next
+   to the Swipe ID box. The name reuses the picker's own detail element, so
+   only the spacing is ours. */
+.swipe_picker_popup .ocs-swipe-greeting-name { margin-left: 8px; font-weight: 600; }
+/* `.class + element` so a theme re-declaring `.text_pole { width: 100% }` after
+   us cannot stretch it across the row and push the Go button off. */
+.swipe_picker_popup select.ocs-swipe-greeting-pick { flex: 0 1 auto; width: auto; min-width: 0; max-width: min(260px, 48vw); margin: 0; }
+/* Only once the dropdown is there: the row is a single line of fixed controls
+   by default, and one more would push the Go button off a phone screen. */
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick) { flex-wrap: wrap; justify-content: center; row-gap: 8px; }

@@ -195,7 +195,6 @@ function applyFeatureState() {
     if (versionOn) installVersionMenu();
     else $('#one_click_snapshot_character_versions, #one_click_snapshot_persona_versions').remove();
 
-    $('[id^="ocs_bulk_character_context_menu_"]').toggleClass('ocs-feature-off', !feature('native.characterBulkButtons'));
     setPersonaManagerEnabled(feature('persona'));
     refreshVersionIndicators();
 }
@@ -3556,148 +3555,122 @@ function installGreetingCatalogIntegration() {
         .on('click.oneClickSnapshotGreetingCatalog', '.open_alternate_greetings, .add_alternate_greeting, .move_up_alternate_greeting, .move_down_alternate_greeting', scheduleNativeGreetingDecoration);
 }
 
-/* ------------------------------------------------ native editor maximizers -- */
+/* ------------------------------------------- swipe picker greeting names -- */
+
+/** SillyTavern names the picker's "Swipe ID" input after the message it is for. */
+const SWIPE_ID_INPUT_PREFIX = 'swipe_picker_id_';
 
 /**
- * Fields in the regex editor that deserve a full-screen editor, keyed by the
- * id to assign. The template's labels already point `for=` at exactly these
- * ids but the controls themselves never got one, so setting them also repairs
- * the label-to-field association.
- */
-const REGEX_MAXIMIZE_FIELDS = [
-    // "Find Regex" is deliberately absent: it is a single-line <input>, and a
-    // full-screen textarea invites a stray newline that would break the pattern.
-    { selector: '.regex_replace_string', id: 'regex_replace_string' },
-    { selector: '.regex_trim_strings', id: 'regex_trim_strings' },
-];
-
-/**
- * Adds SillyTavern's own "maximize" button to the regex editor's long fields.
+ * Names the user gave the opening greetings, keyed by swipe index.
  *
- * Reuses the native `.editor_maximize` control rather than reimplementing it:
- * its handler is delegated on document and resolves the target through
- * `data-for`, so an injected button behaves exactly like the built-in ones.
+ * The swipe-to-greeting relationship is the one the greeting snapshots use:
+ * the map captured when the chat began if there is one, so a card edited since
+ * does not shift every name onto the wrong swipe. The name itself is read
+ * live and matched by text, so a rename shows straight away.
+ *
+ * Only real names count. The fallback "备选开场白 N" is not something the
+ * user wrote, and the picker already numbers every swipe.
+ *
+ * @param {object} character The open character
+ * @returns {Map<number, string>}
  */
-function decorateRegexEditorFields() {
-    if (!feature('native.regexMaximize')) return;
-    const dialog = document.querySelector('dialog.popup[open]');
-    if (!dialog) return;
-
-    for (const { selector, id } of REGEX_MAXIMIZE_FIELDS) {
-        const field = dialog.querySelector(selector);
-        if (!field) continue;
-        if (!field.id) field.id = id;
-
-        const label = field.closest('.flex1')?.querySelector('label.title_restorable');
-        if (!label || label.querySelector('.editor_maximize')) continue;
-        label.classList.add('ocs-regex-label');
-
-        const button = document.createElement('i');
-        button.className = 'editor_maximize fa-solid fa-maximize right_menu_button';
-        button.setAttribute('data-for', field.id);
-        button.title = '展开编辑器';
-        label.append(button);
+function namedOpeningGreetings(character) {
+    const live = greetingCandidates(character);
+    const named = new Map();
+    for (const candidate of openingGreetingCandidates(character)) {
+        const current = live.find(item => item.fingerprint === candidate.fingerprint)
+            ?? live.find(item => item.key === candidate.key);
+        const name = String(current?.metadata?.name ?? '').trim();
+        if (name) named.set(Number(candidate.swipeIndex), name);
     }
+    return named;
 }
 
-/** Watches for the regex editor popup so its fields get maximize buttons. */
-function installNativeEditorMaximizers() {
+/**
+ * Adds greeting names to SillyTavern's swipe picker for the opening message:
+ * beside each swipe's number, and as a dropdown next to the Swipe ID box.
+ *
+ * Idempotent, because it runs again whenever the picker redraws its list --
+ * deleting a swipe from inside it rebuilds every block.
+ *
+ * @param {HTMLDialogElement} dialog The open picker
+ */
+function decorateSwipePicker(dialog) {
+    const input = dialog.querySelector(`input[id^="${SWIPE_ID_INPUT_PREFIX}"]`);
+    if (!(input instanceof HTMLInputElement)) return;
+    const removePick = () => dialog.querySelector('.ocs-swipe-greeting-pick')?.remove();
+
+    // Only the opening message is a list of greetings; every later message's
+    // swipes are generated replies with nothing to name. A group chat has no
+    // single character whose greetings these would be.
+    const messageId = Number(input.id.slice(SWIPE_ID_INPUT_PREFIX.length));
+    const character = currentCharacter();
+    const opening = SillyTavern.getContext()?.chat?.[0];
+    if (!feature('greeting') || messageId !== 0 || !character || !opening || opening.is_user || opening.is_system) return removePick();
+
+    const named = namedOpeningGreetings(character);
+    // Fewer swipes than greetings means one was deleted, and every index after
+    // it has shifted. Better no names than names on the wrong greetings.
+    const expected = Math.max(-1, ...openingGreetingCandidates(character).map(item => Number(item.swipeIndex))) + 1;
+    if (!named.size || (opening.swipes?.length ?? 0) < expected) return removePick();
+
+    for (const block of dialog.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
+        const name = named.get(Number(block.getAttribute('data-swipe-id')));
+        const number = block.querySelector('.select_chat_block_filename');
+        if (!name || !number || number.nextElementSibling?.classList.contains('ocs-swipe-greeting-name')) continue;
+        // The same element the picker uses for its own small details, so it
+        // takes the theme's styling for them rather than a look of our own.
+        const tag = document.createElement('small');
+        tag.className = 'select_chat_block_filename_item ocs-swipe-greeting-name';
+        tag.textContent = name;
+        number.after(tag);
+    }
+
+    let pick = dialog.querySelector('.ocs-swipe-greeting-pick');
+    if (!(pick instanceof HTMLSelectElement)) {
+        pick = document.createElement('select');
+        pick.className = 'text_pole ocs-swipe-greeting-pick';
+        pick.title = '按开场白名称选择';
+        pick.append(new Option('按名称选择…', ''));
+        for (const [index, name] of [...named].sort((a, b) => a[0] - b[0])) {
+            if (index < opening.swipes.length) pick.append(new Option(`#${index + 1} ${name}`, String(index)));
+        }
+        pick.addEventListener('change', () => {
+            if (pick.value === '') return;
+            input.value = String(Number(pick.value) + 1);
+            // Through the picker's own listener, which highlights the swipe and
+            // scrolls it into view exactly as typing the number would.
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        // Beside the Swipe ID box, not inside its <label>: a label forwards
+        // clicks to its control, which would steal focus from the dropdown.
+        const label = dialog.querySelector(`label[for="${input.id}"]`);
+        (label ?? input).before(pick);
+    }
+
+    // Follow the selection however it was made -- clicking a swipe, typing a
+    // number, or picking here -- and fall back to the prompt for an unnamed one.
+    const selected = dialog.querySelector('.swipe_picker_block[highlight]')?.getAttribute('data-swipe-id') ?? '';
+    pick.value = named.has(Number(selected)) && selected !== '' ? selected : '';
+}
+
+/**
+ * Watches for SillyTavern's swipe picker. It exposes no hook, and its dialog is
+ * only attached to the page once its list is fully built, so seeing it appear
+ * is the moment everything needed is in place. Watching `highlight` as well
+ * keeps the dropdown in step with the selection.
+ */
+function installSwipePickerGreetingNames() {
     let queued = false;
     new MutationObserver(() => {
         if (queued) return;
         queued = true;
         queueMicrotask(() => {
             queued = false;
-            decorateRegexEditorFields();
+            const dialog = document.querySelector('dialog.swipe_picker_popup:not([closing])');
+            if (dialog instanceof HTMLDialogElement) decorateSwipePicker(dialog);
         });
-    }).observe(document.body, { childList: true, subtree: true });
-}
-
-/* -------------------------------------------- preset macro autocomplete -- */
-
-/**
- * Stops the macro autocomplete from popping up while typing in the preset
- * prompt editor.
- *
- * SillyTavern has a global "Show in all macro fields" switch, but the preset
- * editor's textarea is marked `data-macros-autocomplete="always"` in the
- * markup, and `always` bypasses that switch — so no setting can quiet this
- * particular field. Downgrading it to the default mode hands it back to the
- * user's own preference; Ctrl+Space still forces the list open.
- *
- * The attribute has to change before the field is initialised: the mode is read
- * once and captured, and the observer skips elements it has already set up.
- */
-function installPresetMacroAutocompleteFix() {
-    const relax = () => {
-        if (!feature('native.quietMacroAutocomplete')) return;
-        for (const node of document.querySelectorAll('[data-macros-autocomplete="always"]')) {
-            node.setAttribute('data-macros-autocomplete', 'default');
-            node.setAttribute('data-ocs-quiet-macros', '');
-        }
-    };
-    relax();
-    new MutationObserver(relax).observe(document.body, { childList: true, subtree: true });
-
-    // The expand button builds a brand new textarea and hardcodes the mode to
-    // `always` on it, so relaxing the attribute afterwards is too late: the
-    // mode is read once, when the element is initialised, and SillyTavern's own
-    // observer was created at import time and therefore runs before ours.
-    //
-    // Instead the source is marked as not carrying macros for the duration of
-    // the click. The copy inherits that and is skipped entirely, while the
-    // source keeps the completion it was given long ago -- its own instance
-    // already exists and is never rebuilt from the attribute.
-    document.addEventListener('click', event => {
-        if (!feature('native.quietMacroAutocomplete')) return;
-
-        const opener = /** @type {HTMLElement?} */ (event.target)?.closest?.('.editor_maximize');
-        const source = opener?.getAttribute('data-for') && document.getElementById(opener.getAttribute('data-for'));
-        if (!(source instanceof HTMLElement) || !source.hasAttribute('data-ocs-quiet-macros')) return;
-        if (source.dataset.macros === undefined || source.dataset.macros === 'false') return;
-
-        const original = source.dataset.macros;
-        source.dataset.macros = 'false';
-        setTimeout(() => { source.dataset.macros = original; }, 0);
-    }, true);
-}
-
-/* -------------------------------------------- character bulk action buttons -- */
-
-/**
- * The bulk actions SillyTavern only exposes through a right-click on a
- * selected character. Delete is omitted: `#bulkDeleteButton` already shows it.
- */
-const CHARACTER_BULK_ACTIONS = [
-    { id: 'character_context_menu_favorite', icon: 'fa-star', title: '收藏 / 取消收藏选中的角色' },
-    { id: 'character_context_menu_tag', icon: 'fa-tags', title: '给选中的角色批量打标签' },
-    { id: 'character_context_menu_duplicate', icon: 'fa-clone', title: '复制选中的角色' },
-    { id: 'character_context_menu_persona', icon: 'fa-user', title: '把选中的角色转为用户角色' },
-];
-
-/**
- * Surfaces the character context menu as visible buttons, left of the trash.
- *
- * Every button just clicks the native menu entry, so there is no second
- * implementation to keep in sync. They carry `bulkEditOptionElement`, the
- * class SillyTavern already shows and hides with bulk edit mode, so their
- * visibility needs no watching of our own.
- */
-function installCharacterBulkActionButtons() {
-    const trash = $('#bulkDeleteButton');
-    if (!trash.length || $('#ocs_bulk_character_context_menu_tag').length) return;
-
-    for (const action of CHARACTER_BULK_ACTIONS) {
-        const button = $('<i class="fa-solid menu_button bulkEditOptionElement" style="display: none;"></i>')
-            .attr({ id: `ocs_bulk_${action.id}`, title: action.title })
-            .addClass(action.icon)
-            .on('click', () => {
-                const entry = /** @type {HTMLElement?} */ (document.getElementById(action.id));
-                if (!entry) return toastr.warning('找不到酒馆对应的批量操作入口。', '一键快照');
-                entry.click();
-            });
-        trash.before(button);
-    }
+    }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['highlight'] });
 }
 
 function greetingBindingRecords(character = currentCharacter()) {
@@ -7175,12 +7148,9 @@ $(async () => {
     installVersionAutoSync();
     installQrShortcut();
     installGreetingCatalogIntegration();
+    installSwipePickerGreetingNames();
     installPersonaManager(settings);
     installPersonaTitleLock();
-    installPresetMacroAutocompleteFix();
-    installNativeEditorMaximizers();
-    installCharacterBulkActionButtons();
-    setTimeout(installCharacterBulkActionButtons, 1000);
     applyFeatureState();
     eventSource.on(event_types.CHAT_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));
     eventSource.on(event_types.PERSONA_CHANGED, () => setTimeout(refreshNameMirrorLocks, 0));

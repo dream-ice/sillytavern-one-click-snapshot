@@ -26,12 +26,12 @@ import { POPUP_TYPE, callGenericPopup } from '../../../popup.js';
  */
 
 /**
- * The five features, each with a master switch.
+ * The four features, each with a master switch.
  *
  * A sub-setting only exists where there is a real choice to make — one that
  * changes what happens to the user's data. Anything that is simply part of the
  * feature working (the version avatar picker, greeting-to-snapshot binding,
- * persona bulk actions, the regex expand buttons) is not a setting, and the
+ * persona bulk actions) is not a setting, and the
  * two version sync switches already live in the version manager where they
  * are used.
  *
@@ -105,19 +105,6 @@ export const FEATURES = [
     },
     { key: 'greeting', label: '开场白管理', note: '在酒馆的开场白编辑面板里加上搜索、分组、拖拽排序和批量操作。' },
     { key: 'persona', label: 'User标签管理', note: '将原生标签管理系统注入用户管理之中。' },
-    {
-        key: 'native',
-        label: '原生小优化',
-        children: [
-            { key: 'native.regexMaximize', label: '正则字段展开按钮', note: '「替换为」和「修剪掉」旁边多一个展开按钮，长内容可以全屏编辑。' },
-            { key: 'native.characterBulkButtons', label: '角色卡批量操作入口', note: '批量模式下，把右键菜单里的收藏、标签、复制、转为用户做成看得见的按钮。' },
-            {
-                key: 'native.quietMacroAutocomplete',
-                label: '预设里不自动弹宏提示',
-                note: '在预设条目的提示词框里写 {{setvar::}} 这类宏时，酒馆会自动弹出补全和说明，挡住正在写的内容。\n\n开启后，输入框里改为跟随用户设置里的「Show in all macro fields」，按 Ctrl+Space 仍可手动调出补全；点展开按钮进入的全屏编辑器里则完全不弹。',
-            },
-        ],
-    },
 ];
 
 /** Flat lookup, so `feature()` stays O(1) and defaults live in one place. */
