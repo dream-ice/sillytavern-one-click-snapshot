@@ -50,6 +50,8 @@ const observedThemeOptionNames = new WeakMap();
 let avatarGalleryStyleObserver = null;
 let observedAvatarGalleryStyle = null;
 let greetingCatalogObserver = null;
+/** Past this many greetings, expanding them all at once is confirmed first. */
+const MANY_GREETINGS = 30;
 let greetingCatalogDecorateQueued = false;
 let greetingCatalogDecorateDeferred = false;
 
@@ -3337,9 +3339,11 @@ function decorateNativeAlternateGreetings() {
             .on('input.oneClickSnapshotGreetingFilter change.oneClickSnapshotGreetingFilter', 'select, input', () => updateNativeGreetingFilter(root, entries));
         toolbar.find('.ocs-native-greeting-expand')
             .off('click.oneClickSnapshotGreetingExpand')
-            .on('click.oneClickSnapshotGreetingExpand', event => {
+            .on('click.oneClickSnapshotGreetingExpand', async event => {
                 event.preventDefault();
                 event.stopPropagation();
+                const count = root.find('.alternate_greeting').length;
+                if (count > MANY_GREETINGS && !await Popup.show.confirm('展开全部开场白', `一共 ${count} 条，全部展开可能让手机卡住甚至刷新页面。确定要展开吗？`)) return;
                 setNativeGreetingDetailsOpen(root, true);
             });
         toolbar.find('.ocs-native-greeting-collapse')
@@ -3405,7 +3409,10 @@ function decorateNativeAlternateGreetings() {
                     entry.metadata.collapsed = collapsed;
                     saveGreetingCatalogState(character, catalog);
                 });
-            details.prop('open', entry.metadata.collapsed !== true);
+            // Only a state the user chose is applied. Otherwise keep what the
+            // native editor rendered: hosts collapse long greeting lists, since
+            // a hundred expanded textareas can bring down a phone's web view.
+            if (typeof entry.metadata.collapsed === 'boolean') details.prop('open', !entry.metadata.collapsed);
             const summaryTitle = details.find('summary strong').first();
             const titleRow = summaryTitle.closest('.flex-container').first();
             const controls = details.find('summary .title_restorable').first();
