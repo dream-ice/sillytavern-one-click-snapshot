@@ -3409,10 +3409,12 @@ function decorateNativeAlternateGreetings() {
                     entry.metadata.collapsed = collapsed;
                     saveGreetingCatalogState(character, catalog);
                 });
-            // Only a state the user chose is applied. Otherwise keep what the
-            // native editor rendered: hosts collapse long greeting lists, since
-            // a hundred expanded textareas can bring down a phone's web view.
-            if (typeof entry.metadata.collapsed === 'boolean') details.prop('open', !entry.metadata.collapsed);
+            // Only a greeting the user collapsed is closed here; everything else
+            // keeps what the native editor rendered. Hosts start long greeting
+            // lists collapsed, since a hundred expanded textareas can bring down
+            // a phone's web view. `collapsed: false` cannot mean "keep it open":
+            // reconcileGreetingCatalog writes it for every greeting by default.
+            if (entry.metadata.collapsed === true) details.prop('open', false);
             const summaryTitle = details.find('summary strong').first();
             const titleRow = summaryTitle.closest('.flex-container').first();
             const controls = details.find('summary .title_restorable').first();
