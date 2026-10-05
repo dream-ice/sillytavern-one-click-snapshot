@@ -840,6 +840,10 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
 /* `.class + element` so a theme re-declaring `.text_pole { width: 100% }` after
    us cannot stretch it across the row and push the Go button off. */
 .swipe_picker_popup select.ocs-swipe-greeting-pick { flex: 0 1 auto; width: auto; min-width: 0; max-width: min(260px, 48vw); margin: 0; }
-/* Only once the dropdown is there: the row is a single line of fixed controls
-   by default, and one more would push the Go button off a phone screen. */
-.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick) { flex-wrap: wrap; justify-content: center; row-gap: 8px; }
+.swipe_picker_popup select.ocs-swipe-greeting-group { flex: 0 1 auto; width: auto; min-width: 0; max-width: min(170px, 40vw); margin: 0; }
+/* Only once our dropdowns are there: the row is a single line of fixed
+   controls by default, and more would push the Go button off a phone screen. */
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick, .ocs-swipe-greeting-group) { flex-wrap: wrap; justify-content: center; row-gap: 8px; }
+/* Two classes plus `!important`: the wrapper is a `flex-container`, and that
+   is a display rule a theme may well have made important itself. */
+.swipe_picker_popup .ocs-swipe-filtered { display: none !important; }

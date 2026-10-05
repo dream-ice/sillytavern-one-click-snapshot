@@ -2531,6 +2531,12 @@ async function applySnapshotPersonaVersion(payload) {
         return;
     }
     await applyPersona(version.data, version.id);
+    // applyPersona restores the descriptor saved with the version, title and
+    // all, so whatever label was there when the version was saved comes back.
+    // The version manager re-mirrors the name straight after; this path has to
+    // as well, or the persona shows a stale label. The character path mirrors
+    // inside applyCharacter, so only personas need it here.
+    await applyNameMirror('persona');
 }
 
 function bindingProblems(snapshot, { allowUserChange = false } = {}) {
@@ -3561,44 +3567,54 @@ function installGreetingCatalogIntegration() {
 const SWIPE_ID_INPUT_PREFIX = 'swipe_picker_id_';
 
 /**
- * Names the user gave the opening greetings, keyed by swipe index.
+ * The name and group the user gave each opening greeting, keyed by swipe index.
  *
  * The swipe-to-greeting relationship is the one the greeting snapshots use:
  * the map captured when the chat began if there is one, so a card edited since
- * does not shift every name onto the wrong swipe. The name itself is read
- * live and matched by text, so a rename shows straight away.
+ * does not shift everything onto the wrong swipe. Name and group are read live
+ * and matched by text, so a rename or regroup shows straight away.
  *
  * Only real names count. The fallback "备选开场白 N" is not something the
  * user wrote, and the picker already numbers every swipe.
  *
  * @param {object} character The open character
- * @returns {Map<number, string>}
+ * @returns {Map<number, {name: string, group: string}>}
  */
-function namedOpeningGreetings(character) {
+function openingGreetingInfo(character) {
     const live = greetingCandidates(character);
-    const named = new Map();
+    const info = new Map();
     for (const candidate of openingGreetingCandidates(character)) {
         const current = live.find(item => item.fingerprint === candidate.fingerprint)
             ?? live.find(item => item.key === candidate.key);
-        const name = String(current?.metadata?.name ?? '').trim();
-        if (name) named.set(Number(candidate.swipeIndex), name);
+        info.set(Number(candidate.swipeIndex), {
+            name: String(current?.metadata?.name ?? '').trim(),
+            group: String(current?.metadata?.group ?? '').trim(),
+        });
     }
-    return named;
+    return info;
 }
 
+/** The group filter's "no filter" value, as the greeting panel spells it. */
+const ALL_GREETING_GROUPS = '__all__';
+
 /**
- * Adds greeting names to SillyTavern's swipe picker for the opening message:
- * beside each swipe's number, and as a dropdown next to the Swipe ID box.
+ * Adds the greeting catalog to SillyTavern's swipe picker for the opening
+ * message: each swipe's name beside its number, a group filter, and a dropdown
+ * that jumps by name.
  *
  * Idempotent, because it runs again whenever the picker redraws its list --
- * deleting a swipe from inside it rebuilds every block.
+ * deleting a swipe from inside it rebuilds every block -- and whenever the
+ * selection moves.
  *
  * @param {HTMLDialogElement} dialog The open picker
  */
 function decorateSwipePicker(dialog) {
     const input = dialog.querySelector(`input[id^="${SWIPE_ID_INPUT_PREFIX}"]`);
     if (!(input instanceof HTMLInputElement)) return;
-    const removePick = () => dialog.querySelector('.ocs-swipe-greeting-pick')?.remove();
+    const removeControls = () => {
+        dialog.querySelectorAll('.ocs-swipe-greeting-pick, .ocs-swipe-greeting-group').forEach(node => node.remove());
+        dialog.querySelectorAll('.ocs-swipe-filtered').forEach(node => node.classList.remove('ocs-swipe-filtered'));
+    };
 
     // Only the opening message is a list of greetings; every later message's
     // swipes are generated replies with nothing to name. A group chat has no
@@ -3606,16 +3622,19 @@ function decorateSwipePicker(dialog) {
     const messageId = Number(input.id.slice(SWIPE_ID_INPUT_PREFIX.length));
     const character = currentCharacter();
     const opening = SillyTavern.getContext()?.chat?.[0];
-    if (!feature('greeting') || messageId !== 0 || !character || !opening || opening.is_user || opening.is_system) return removePick();
+    if (!feature('greeting') || messageId !== 0 || !character || !opening || opening.is_user || opening.is_system) return removeControls();
 
-    const named = namedOpeningGreetings(character);
+    const info = openingGreetingInfo(character);
+    const named = [...info].filter(([, item]) => item.name).sort((a, b) => a[0] - b[0]);
+    // Same list and order as the greeting panel's own group filter.
+    const groups = [...new Set([...info.values()].map(item => item.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
     // Fewer swipes than greetings means one was deleted, and every index after
-    // it has shifted. Better no names than names on the wrong greetings.
+    // it has shifted. Better nothing than names and groups on the wrong ones.
     const expected = Math.max(-1, ...openingGreetingCandidates(character).map(item => Number(item.swipeIndex))) + 1;
-    if (!named.size || (opening.swipes?.length ?? 0) < expected) return removePick();
+    if ((!named.length && !groups.length) || (opening.swipes?.length ?? 0) < expected) return removeControls();
 
     for (const block of dialog.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
-        const name = named.get(Number(block.getAttribute('data-swipe-id')));
+        const name = info.get(Number(block.getAttribute('data-swipe-id')))?.name;
         const number = block.querySelector('.select_chat_block_filename');
         if (!name || !number || number.nextElementSibling?.classList.contains('ocs-swipe-greeting-name')) continue;
         // The same element the picker uses for its own small details, so it
@@ -3626,15 +3645,45 @@ function decorateSwipePicker(dialog) {
         number.after(tag);
     }
 
+    // Beside the Swipe ID box, not inside its <label>: a label forwards clicks
+    // to its control, which would steal focus from the dropdowns.
+    const anchor = dialog.querySelector(`label[for="${input.id}"]`) ?? input;
+
+    let groupPick = dialog.querySelector('.ocs-swipe-greeting-group');
+    if (!groups.length) {
+        groupPick?.remove();
+        groupPick = null;
+    } else if (!(groupPick instanceof HTMLSelectElement)) {
+        groupPick = document.createElement('select');
+        groupPick.className = 'text_pole ocs-swipe-greeting-group';
+        groupPick.title = '按开场白分组筛选';
+        groupPick.append(new Option('全部分组', ALL_GREETING_GROUPS), new Option('未分组', ''));
+        for (const group of groups) groupPick.append(new Option(group, group));
+        groupPick.value = ALL_GREETING_GROUPS;
+        groupPick.addEventListener('change', () => decorateSwipePicker(dialog));
+        anchor.before(groupPick);
+    }
+    const group = groupPick instanceof HTMLSelectElement ? groupPick.value : ALL_GREETING_GROUPS;
+    // Swipes past the last greeting were generated, not picked from the card,
+    // so they belong to no group and only show when nothing is filtered.
+    const inGroup = index => group === ALL_GREETING_GROUPS || (info.has(index) && info.get(index).group === group);
+
+    // A class rather than an inline `display`: the block's wrapper is a
+    // `flex-container`, and a theme declaring that with `!important` would win.
+    for (const block of dialog.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
+        const wrapper = block.closest('.select_chat_block_wrapper') ?? block;
+        wrapper.classList.toggle('ocs-swipe-filtered', !inGroup(Number(block.getAttribute('data-swipe-id'))));
+    }
+
     let pick = dialog.querySelector('.ocs-swipe-greeting-pick');
+    if (!named.length) {
+        pick?.remove();
+        return;
+    }
     if (!(pick instanceof HTMLSelectElement)) {
         pick = document.createElement('select');
         pick.className = 'text_pole ocs-swipe-greeting-pick';
         pick.title = '按开场白名称选择';
-        pick.append(new Option('按名称选择…', ''));
-        for (const [index, name] of [...named].sort((a, b) => a[0] - b[0])) {
-            if (index < opening.swipes.length) pick.append(new Option(`#${index + 1} ${name}`, String(index)));
-        }
         pick.addEventListener('change', () => {
             if (pick.value === '') return;
             input.value = String(Number(pick.value) + 1);
@@ -3642,16 +3691,25 @@ function decorateSwipePicker(dialog) {
             // scrolls it into view exactly as typing the number would.
             input.dispatchEvent(new Event('input', { bubbles: true }));
         });
-        // Beside the Swipe ID box, not inside its <label>: a label forwards
-        // clicks to its control, which would steal focus from the dropdown.
-        const label = dialog.querySelector(`label[for="${input.id}"]`);
-        (label ?? input).before(pick);
+        anchor.before(pick);
+    }
+    // Refilled only when the group changes. Refilling is itself a change to the
+    // page, and doing it on every pass would retrigger the observer that runs
+    // this one.
+    if (pick.dataset.group !== group) {
+        pick.dataset.group = group;
+        pick.replaceChildren(
+            new Option('按名称选择…', ''),
+            ...named.filter(([index]) => index < opening.swipes.length && inGroup(index))
+                .map(([index, item]) => new Option(`#${index + 1} ${item.name}`, String(index))),
+        );
     }
 
     // Follow the selection however it was made -- clicking a swipe, typing a
-    // number, or picking here -- and fall back to the prompt for an unnamed one.
+    // number, or picking here -- and fall back to the prompt when the selected
+    // swipe has no name or sits outside the group.
     const selected = dialog.querySelector('.swipe_picker_block[highlight]')?.getAttribute('data-swipe-id') ?? '';
-    pick.value = named.has(Number(selected)) && selected !== '' ? selected : '';
+    pick.value = selected !== '' && [...pick.options].some(option => option.value === selected) ? selected : '';
 }
 
 /**
