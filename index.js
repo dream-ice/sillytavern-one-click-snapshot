@@ -603,10 +603,42 @@ function getPresetTransferWorldbookEntryGroups(worldbookName, orderedUids, data 
     }
 }
 
+function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data = null) {
+    try {
+        const transfer = getPresetTransferSettings();
+        const raw = transfer?.worldbookEntryGroupingsBackup?.[worldbookName]
+            ?? data?.extensions?.presetTransfer?.worldbookEntryGrouping;
+        if (!Array.isArray(raw) || !raw.length) return [];
+        const uids = orderedUids.map(String);
+        const gates = [];
+        for (const [index, grouping] of raw.entries()) {
+            let start = grouping?.startUid == null ? -1 : uids.indexOf(String(grouping.startUid));
+            let end = grouping?.endUid == null ? -1 : uids.indexOf(String(grouping.endUid));
+            if ((start < 0 || end < 0) && Number.isInteger(grouping?.startIndex) && Number.isInteger(grouping?.endIndex)) {
+                start = grouping.startIndex;
+                end = grouping.endIndex;
+            }
+            if (start < 0 || end < 0) continue;
+            const members = uids.slice(Math.min(start, end), Math.max(start, end) + 1);
+            if (!members.length) continue;
+            gates.push({
+                id: String(grouping?.id ?? `${worldbookName}:${index}:${members[0]}:${members.at(-1)}`),
+                name: String(grouping?.name ?? grouping?.groupName ?? '未命名分组'),
+                uids: members,
+                enabled: grouping?.gate !== false,
+            });
+        }
+        return gates;
+    } catch {
+        return [];
+    }
+}
+
 function presetGroupingProvider() {
     if (globalThis.__baiBaiToolkitExtensionInstalled && typeof globalThis.__baiBaiToolkitExtensionInstalled === 'object') return 'baibai';
     const context = SillyTavern.getContext();
     const container = context?.extensionSettings ?? extension_settings;
+    if (typeof window.PT_setWorldbookGroupGate === 'function') return 'preset-transfer';
     if (['presetTransfer', 'preset-transfer', 'PresetTransfer'].some(key => Object.hasOwn(container ?? {}, key))) return 'preset-transfer';
     return null;
 }
@@ -707,7 +739,7 @@ function presetPromptGroupState(settings, preset = null) {
 /**
  * The prompt groups and their global switches.
  *
- * That switch is an overlay: toggling it writes
+ * That switch is an overlay, exactly like the worldbook one: toggling it writes
  * `group.enabled` and leaves each prompt's own flag untouched, with the
  * effective state worked out as `item.enabled && group.enabled` at send time.
  * A snapshot has to record both to be able to reproduce what was in effect.
@@ -833,13 +865,20 @@ async function captureWorldBook(descriptor, groups = null) {
     const entries = Object.entries(data.entries)
         .sort(([, a], [, b]) => Number(a?.displayIndex ?? 0) - Number(b?.displayIndex ?? 0));
     const ptGroups = getPresetTransferWorldbookEntryGroups(descriptor.name, entries.map(([uid]) => uid), data);
+    const ptGates = getPresetTransferWorldbookEntryGates(descriptor.name, entries.map(([uid]) => uid), data);
+    const gatedOffUids = new Set(ptGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
     return {
         ...descriptor,
         group: bookGroups.get(descriptor.name) ?? '',
+        ptGates,
         entries: entries.map(([uid, entry]) => ({
             uid: String(uid),
             label: entryLabel(entry, uid),
-            enabled: !entry.disable,
+            // PT's group switch is an overlay, not entry.disable. Record
+            // the effective state users see, while retaining raw state for
+            // a lossless restore of a group that is currently gated off.
+            enabled: !entry.disable && !gatedOffUids.has(String(uid)),
+            rawEnabled: !entry.disable,
             // Always recorded, whatever the setting says. Recording changes
             // nothing, and gating it would let an ordinary refresh with the
             // setting off wipe out strategies the user had already captured.
@@ -1697,14 +1736,71 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
         // one of those places is compatible with the current chat.
         if (sources.length && !sources.some(source => !excludedSources.has(source))) continue;
         if (!world_names.includes(book.name)) continue;
-        const data = await loadWorldInfo(book.name);
+        let data = await loadWorldInfo(book.name);
+        if (!data?.entries) continue;
+        const orderedUids = Object.entries(data.entries)
+            .sort(([, a], [, b]) => Number(a?.displayIndex ?? 0) - Number(b?.displayIndex ?? 0))
+            .map(([uid]) => String(uid));
+        const savedGates = Array.isArray(book.ptGates) ? book.ptGates : [];
+        const currentGates = getPresetTransferWorldbookEntryGates(book.name, orderedUids, data);
+        const protectedUids = new Set(currentGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
+        // What the snapshot says should actually be in effect. A group gate is
+        // derived from this rather than restored from the recorded gate state:
+        // the snapshot stores the effective switches, so a group holding
+        // anything that must be on has to be gated on for that to be reachable.
+        const wantedUids = new Set((book.entries ?? []).filter(entry => entry.enabled).map(entry => String(entry.uid)));
+
+        // Stock preset-transfer groups worldbook entries but has no group
+        // switch, so every gate reads as open and there is nothing to
+        // reproduce. Engaging this path there would warn about a feature that
+        // build does not have and skip every grouped entry, which is most of
+        // them. Only a build that actually has the switch -- or a library that
+        // already has one closed -- gets the gate treatment.
+        const ptSetGate = window.PT_setWorldbookGroupGate;
+        const hasGateControl = typeof ptSetGate === 'function';
+        const hasClosedGate = savedGates.some(gate => !gate.enabled) || currentGates.some(gate => !gate.enabled);
+
+        if (savedGates.length && (hasGateControl || hasClosedGate)) {
+            if (hasGateControl) {
+                for (const gate of savedGates) {
+                    const members = gate.uids.filter(uid => orderedUids.includes(String(uid))).map(String);
+                    if (!members.length) continue;
+                    const wanted = members.some(uid => wantedUids.has(uid));
+                    const ok = await ptSetGate(book.name, gate.id, !wanted, members, orderedUids);
+                    // A group the snapshot leaves entirely off is gated off and
+                    // then left alone: the snapshot only says it should not be
+                    // in effect, which the closed gate already achieves, and
+                    // rewriting the switches underneath would throw away a
+                    // grouping the user set up for their own reasons.
+                    if (ok && wanted) members.forEach(uid => protectedUids.delete(uid));
+                    else members.forEach(uid => protectedUids.add(uid));
+                }
+                // PT's own setter persists grouping metadata. Reload the file
+                // before touching individual entry switches so we never write
+                // a stale, grouping-less object back over it.
+                data = await loadWorldInfo(book.name);
+            }
+            // Deliberately silent, and deliberately does nothing else. The
+            // snapshot recorded a closed gate but there is no setter to move
+            // one; entry switches are still restored as normal, and the only
+            // groups left alone are those closed in the user's own library
+            // right now, which `protectedUids` already covers. Warning here
+            // would name a group switch to someone whose build of
+            // preset-transfer has none, reading as a fault in this extension
+            // rather than as the no-op it is.
+            else console.debug('[One-click Snapshot] no worldbook group gate setter; gates left as they are', book.name);
+        }
         if (!data?.entries) continue;
         let changed = false;
         for (const saved of book.entries ?? []) {
             const entry = data.entries[saved.uid];
-            if (!entry) continue;
-            if (!!entry.disable === !!saved.enabled) {
-                entry.disable = !saved.enabled;
+            if (!entry || protectedUids.has(String(saved.uid))) continue;
+            // A closed PT gate already controls effective enablement. Restore
+            // the underlying per-entry state without turning that group into
+            // a pile of permanently disabled entries.
+            const desiredEnabled = saved.enabled;
+            if (!!entry.disable === !!desiredEnabled) {
+                entry.disable = !desiredEnabled;
                 changed = true;
             }
             // Only snapshots that recorded a strategy carry one; older ones
@@ -1778,8 +1874,8 @@ async function applyPreset(state) {
         // the same preset is still avoided above.
         const enabledByIdentifier = new Map(savedPromptEntries.map(entry => [entry.identifier, !!entry.enabled]));
 
-        // Group switches are derived rather than restored: the snapshot
-        // records what was in effect, so a
+        // Group switches are derived rather than restored, for the same reason
+        // as the worldbook ones: the snapshot records what was in effect, so a
         // group holding anything that must be on has to be switched on for that
         // to be reachable. A group the snapshot leaves entirely off is switched
         // off and its own entries are left exactly as the user arranged them --
@@ -5024,7 +5120,11 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
     const entrySwitch = (entry, afterChange) => {
         const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
         input.on('change', function () {
+            // A hand-picked state is the one to restore, so the raw value moves
+            // with it. Leaving it behind would make a group that is gated off
+            // today restore the old switch instead of this one.
             entry.enabled = this.checked;
+            entry.rawEnabled = this.checked;
             afterChange();
         });
         const toggle = $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
@@ -5082,7 +5182,10 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
             event.preventDefault();
             event.stopPropagation();
             const value = !sync();
-            for (const entry of entries) entry.enabled = value;
+            for (const entry of entries) {
+                entry.enabled = value;
+                entry.rawEnabled = value;
+            }
             afterChange(true);
         });
         return button;
