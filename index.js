@@ -575,8 +575,38 @@ function getPresetTransferSettings() {
     return container?.presetTransfer ?? container?.['preset-transfer'] ?? container?.PresetTransfer ?? {};
 }
 
+/**
+ * Per-book entry group records, keyed by book name. Once a book has a record
+ * here -- even an empty one -- it is authoritative and the range backup below
+ * is stale.
+ *
+ * @param {string} worldbookName Book name
+ * @returns {{groups: object[], entries: Record<string, {groupId: string}>}|null}
+ */
+function worldbookEntryGroupRecord(worldbookName) {
+    const record = getPresetTransferSettings()?.worldbookEntryGroups?.[worldbookName];
+    if (!record || typeof record !== 'object' || !Array.isArray(record.groups)) return null;
+    return { groups: record.groups, entries: record.entries && typeof record.entries === 'object' ? record.entries : {} };
+}
+
+/** Whether entry group records exist at all on this install. */
+function hasWorldbookEntryGroupRecords() {
+    const records = getPresetTransferSettings()?.worldbookEntryGroups;
+    return Boolean(records && typeof records === 'object');
+}
+
 function getPresetTransferWorldbookEntryGroups(worldbookName, orderedUids, data = null) {
     try {
+        const record = worldbookEntryGroupRecord(worldbookName);
+        if (record) {
+            const names = new Map(record.groups.map(group => [String(group?.id ?? ''), String(group?.name ?? '').trim() || '未命名分组']));
+            const assignments = new Map();
+            for (const [uid, meta] of Object.entries(record.entries)) {
+                const name = names.get(String(meta?.groupId ?? ''));
+                if (name) assignments.set(String(uid), name);
+            }
+            return assignments;
+        }
         const transfer = getPresetTransferSettings();
         const raw = transfer?.worldbookEntryGroupingsBackup?.[worldbookName]
             ?? data?.extensions?.presetTransfer?.worldbookEntryGrouping;
@@ -605,6 +635,19 @@ function getPresetTransferWorldbookEntryGroups(worldbookName, orderedUids, data 
 
 function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data = null) {
     try {
+        const record = worldbookEntryGroupRecord(worldbookName);
+        if (record) {
+            const uids = orderedUids.map(String);
+            return record.groups.map(group => {
+                const id = String(group?.id ?? '');
+                return {
+                    id,
+                    name: String(group?.name ?? '').trim() || '未命名分组',
+                    uids: uids.filter(uid => String(record.entries[uid]?.groupId ?? '') === id),
+                    enabled: group?.enabled !== false,
+                };
+            }).filter(gate => gate.id && gate.uids.length);
+        }
         const transfer = getPresetTransferSettings();
         const raw = transfer?.worldbookEntryGroupingsBackup?.[worldbookName]
             ?? data?.extensions?.presetTransfer?.worldbookEntryGrouping;
@@ -634,8 +677,36 @@ function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data =
     }
 }
 
+/** Key of the state object found by `groupingExtensionState`, once found. */
+let groupingStateKey = null;
+
+/**
+ * The extension state object that carries the preset prompt grouping.
+ *
+ * Looked up by the property it holds rather than by a fixed global name, so
+ * any build that keeps the same runtime state is recognised. The property is
+ * set lazily, so this can come up empty early on; callers already fall back to
+ * the stored copy in that case.
+ *
+ * @returns {object|null}
+ */
+function groupingExtensionState() {
+    const named = globalThis.__baiBaiToolkitExtensionInstalled;
+    if (named && typeof named === 'object') return named;
+    if (groupingStateKey && globalThis[groupingStateKey] && typeof globalThis[groupingStateKey] === 'object') return globalThis[groupingStateKey];
+    for (const key of Object.keys(globalThis)) {
+        if (!key.startsWith('__')) continue;
+        const value = globalThis[key];
+        if (value && typeof value === 'object' && 'presetPromptGroupRuntimeState' in value) {
+            groupingStateKey = key;
+            return value;
+        }
+    }
+    return null;
+}
+
 function presetGroupingProvider() {
-    if (globalThis.__baiBaiToolkitExtensionInstalled && typeof globalThis.__baiBaiToolkitExtensionInstalled === 'object') return 'baibai';
+    if (groupingExtensionState() || hasWorldbookEntryGroupRecords()) return 'baibai';
     const context = SillyTavern.getContext();
     const container = context?.extensionSettings ?? extension_settings;
     if (typeof window.PT_setWorldbookGroupGate === 'function') return 'preset-transfer';
@@ -719,7 +790,7 @@ function presetPromptGroupState(settings, preset = null) {
     // to it and is then overwritten. Its extension object is that same state
     // container, which is what makes the live copy reachable from here.
     if (provider === 'baibai' && !preset) {
-        const runtime = globalThis.__baiBaiToolkitExtensionInstalled?.presetPromptGroupRuntimeState;
+        const runtime = groupingExtensionState()?.presetPromptGroupRuntimeState;
         if (hasUsablePresetGroupState(runtime)) return runtime;
     }
 
@@ -7207,6 +7278,13 @@ $(async () => {
     installQrShortcut();
     installGreetingCatalogIntegration();
     installSwipePickerGreetingNames();
+    // A personal branch. Its group handling assumes an environment only one
+    // install has, so anywhere else it says so rather than behaving oddly.
+    eventSource.once(event_types.APP_READY, () => {
+        if (hasWorldbookEntryGroupRecords() || groupingExtensionState()) return;
+        console.error('[One-click Snapshot] icedream-only is a personal branch; switch the extension back to main.');
+        toastr.error('当前是 icedream 的个人分支（icedream-only），不对外提供支持。请在插件目录切回 main 分支。', '一键快照', { timeOut: 0, extendedTimeOut: 0 });
+    });
     installPersonaManager(settings);
     installPersonaTitleLock();
     applyFeatureState();
