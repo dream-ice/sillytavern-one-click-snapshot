@@ -297,24 +297,48 @@
 .ocs-card-actions .ocs-button { min-height: 28px; padding: 4px 7px; font-size: .72em; }
 .ocs-empty { padding: 12px 2px; opacity: .68; font-size: .85em; }
 .ocs-greeting-choice { display: grid; gap: 9px; min-width: min(420px, 78vw); }
-.ocs-greeting-choice-groups { display: grid; gap: 5px; }
-.ocs-greeting-choice-group-title { font-size: .9em; }
-.ocs-greeting-choice-group-tags { display: flex; flex-wrap: wrap; gap: 5px; }
-.ocs-greeting-choice-group-tag { margin: 0; padding: 3px 8px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 78%, transparent); border-radius: 999px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: .8em; line-height: 1.25; opacity: .76; }
-.ocs-greeting-choice-group-tag:hover { border-color: var(--SmartThemeQuoteColor, #9cc); color: var(--SmartThemeQuoteColor, #9cc); opacity: 1; }
-.ocs-greeting-choice-group-tag.is-active { border-color: var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 16%, transparent); color: var(--SmartThemeQuoteColor, inherit); opacity: 1; }
+.ocs-greeting-tag-editor { display: grid; gap: 11px; width: min(440px, 82vw); color: var(--SmartThemeBodyColor, inherit); text-align: left; }
+.ocs-greeting-tag-hint { margin: 0; font-size: .88em; line-height: 1.45; opacity: .72; }
+.ocs-greeting-tag-mode { display: flex; width: fit-content; max-width: 100%; gap: 3px; padding: 3px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 55%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 20%, transparent); }
+.ocs-greeting-tag-mode-button { padding: 5px 10px; border: 0; border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font: inherit; font-size: .84em; opacity: .68; }
+.ocs-greeting-tag-mode-button.is-active { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 18%, transparent); color: var(--SmartThemeQuoteColor, inherit); opacity: 1; }
+.ocs-greeting-tag-options { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 7px; max-height: min(34vh, 250px); min-height: 34px; overflow: auto; padding: 2px 1px; }
+.ocs-greeting-tag-chip,
+.ocs-greeting-choice-tag { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 29px; max-width: 100%; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 72%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 12%, transparent); color: inherit; cursor: pointer; font: inherit; font-size: .84em; line-height: 1.2; opacity: .82; transition: border-color .14s ease, background-color .14s ease, color .14s ease, transform .14s ease; }
+.ocs-greeting-tag-chip > span,
+.ocs-greeting-choice-tag { overflow-wrap: anywhere; }
+.ocs-greeting-tag-chip:hover,
+.ocs-greeting-choice-tag:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 72%, transparent); opacity: 1; }
+.ocs-greeting-tag-chip.is-active,
+.ocs-greeting-choice-tag.is-active { border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 78%, transparent); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 17%, transparent); color: var(--SmartThemeQuoteColor, inherit); opacity: 1; }
+.ocs-greeting-tag-chip i { font-size: .78em; }
+.ocs-greeting-tag-empty { align-self: center; padding: 5px 2px; font-size: .82em; opacity: .58; }
+.ocs-greeting-tag-create { display: flex; min-width: 0; gap: 6px; }
+.ocs-greeting-tag-input { flex: 1 1 auto; width: auto; min-width: 0; min-height: 32px; }
+.ocs-greeting-tag-add { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; min-width: 68px; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 48%, transparent); border-radius: 7px; background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 11%, transparent); color: var(--SmartThemeQuoteColor, inherit); cursor: pointer; font: inherit; font-size: .84em; }
+.ocs-greeting-tag-add:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 20%, transparent); }
+.ocs-greeting-choice-tags { display: grid; }
+.ocs-greeting-choice-tag-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.ocs-greeting-choice-tag { min-height: 28px; padding: 4px 9px; }
+.ocs-greeting-filter-wrap { display: block; min-width: 0; text-align: left !important; }
+.ocs-native-greeting-filter-tags,
+.ocs-swipe-greeting-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; max-height: 88px; min-width: 0; overflow-y: auto; padding: 1px 1px 3px; }
+.ocs-greeting-filter-chip { position: relative; z-index: 2; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-height: 26px; max-width: 100%; padding: 4px 9px; border: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 70%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 10%, transparent); color: inherit; cursor: pointer; font: inherit; font-size: .78em; line-height: 1.15; opacity: .76; pointer-events: auto; text-align: center; transition: border-color .14s ease, background-color .14s ease, color .14s ease, opacity .14s ease; }
+.ocs-greeting-filter-chip:hover { border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 70%, transparent); opacity: 1; }
+.ocs-greeting-filter-chip.is-active { border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 76%, transparent); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 16%, transparent); color: var(--SmartThemeQuoteColor, inherit); opacity: 1; }
 .ocs-greeting-choice-label { display: grid; gap: 5px; font-size: .9em; }
 .ocs-greeting-choice-label select { width: 100%; min-width: 0; }
 .ocs-greeting-choice-preview { max-height: 12em; margin: 0; padding: 8px 9px; overflow: auto; border: 1px solid var(--SmartThemeBorderColor, #777); border-radius: 5px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 18%, transparent); font-size: .84em; line-height: 1.45; white-space: pre-wrap; }
-.ocs-native-greeting-toolbar { display: flex; align-items: center; gap: 6px; margin: 7px 0 3px; }
+.ocs-native-greeting-toolbar { position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; margin: 7px 0 5px; text-align: left; }
+.ocs-native-greeting-search-row { display: flex; align-items: center; min-width: 0; gap: 8px; }
 .alternate_grettings.ocs-native-greeting-catalog { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
 .alternate_grettings.ocs-native-greeting-catalog .alternate_greetings_list { min-height: 0; }
-.ocs-native-greeting-toolbar-filters { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; gap: 6px; }
 .ocs-native-greeting-toolbar :is(select, input) { box-sizing: border-box; min-width: 0; margin: 0; }
 .ocs-native-greeting-filter-search { flex: 1 1 auto; width: auto !important; }
-.ocs-native-greeting-filter-group { flex: 0 1 154px; width: 154px !important; }
 .ocs-native-greeting-toolbar-actions,
-.ocs-native-greeting-toolbar-batch-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.ocs-native-greeting-toolbar-batch-actions { display: flex; align-items: center; justify-self: end; gap: 4px; }
+.ocs-native-greeting-toolbar-actions { flex: 0 0 auto; }
+.ocs-native-greeting-toolbar-batch-actions { justify-self: end; }
 .ocs-native-greeting-toolbar .menu_button { flex: 0 0 auto; min-width: 30px; margin: 0; }
 .ocs-native-greeting-batch-only { display: none !important; }
 .ocs-greeting-batch-mode .ocs-native-greeting-batch-only { display: flex !important; }
@@ -323,13 +347,15 @@
 .ocs-native-greeting-select.is-selected { color: var(--SmartThemeQuoteColor, inherit); }
 .ocs-native-greeting-drag-handle { display: none !important; cursor: grab; }
 .ocs-greeting-drag-mode .ocs-native-greeting-drag-handle { display: flex !important; }
+.alternate_grettings.ocs-native-greeting-catalog .move_up_alternate_greeting,
+.alternate_grettings.ocs-native-greeting-catalog .move_down_alternate_greeting { display: none !important; }
 .ocs-greeting-drag-mode .alternate_greeting { cursor: default; }
 .ocs-greeting-drag-mode .alternate_greeting.ui-sortable-helper { opacity: .78; }
 .ocs-greeting-drag-mode .alternate_greeting.ui-sortable-placeholder { visibility: visible !important; min-height: 46px; border: 1px dashed var(--SmartThemeQuoteColor, #9cc); background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 8%, transparent); }
-.ocs-native-greeting-drag-toggle.active,
 .ocs-native-greeting-batch.active { color: var(--SmartThemeQuoteColor, inherit); }
 .ocs-native-greeting-number { margin-left: 3px; opacity: .5; font-size: .76em; font-weight: 400; }
-.ocs-native-greeting-group-badge { max-width: 12em; margin-left: 2px; padding: 1px 5px; overflow: hidden; border-radius: 4px; background: color-mix(in srgb, var(--SmartThemeBlurTintColor, #111) 36%, transparent); color: var(--SmartThemeQuoteColor, inherit); font-size: .7em; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.ocs-native-greeting-tag-list { display: inline-flex; flex: 0 1 auto; flex-wrap: wrap; min-width: 0; gap: 3px; margin-left: 2px; }
+.ocs-native-greeting-tag-badge { max-width: 10em; padding: 1px 6px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 28%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 9%, transparent); color: var(--SmartThemeQuoteColor, inherit); font-size: .7em; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 
 .ocs-contents-popup { width: 100%; max-width: none; text-align: left !important; }
 .ocs-dialog .ocs-contents-popup,
@@ -700,14 +726,18 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
     /* Alternate-greeting management stays deliberately compact on phones:
        filter first, then a predictable strip of touch-sized controls. */
     .ocs-greeting-choice { width: 100%; min-width: 0; }
-    .ocs-greeting-choice-group-tag { min-height: 30px; padding: 4px 9px; }
-    .ocs-native-greeting-toolbar { display: grid; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr); gap: 6px; margin: 9px 0 6px; }
-    .ocs-native-greeting-toolbar-filters { display: grid; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr) minmax(94px, .82fr); gap: 5px; }
-    .ocs-native-greeting-filter-search,
-    .ocs-native-greeting-filter-group { box-sizing: border-box !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important; min-height: 32px; }
-    .ocs-native-greeting-toolbar-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+    .ocs-greeting-tag-editor { width: 100%; }
+    .ocs-greeting-tag-chip,
+    .ocs-greeting-choice-tag { min-height: 32px; padding: 5px 10px; }
+    .ocs-native-greeting-toolbar { display: grid; box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; grid-template-columns: minmax(0, 1fr); gap: 7px; margin: 9px 0 6px; }
+    .ocs-native-greeting-search-row { width: 100%; min-width: 0; gap: 5px; }
+    .ocs-native-greeting-filter-search { box-sizing: border-box !important; flex: 1 1 auto; width: auto !important; min-width: 0 !important; max-width: 100% !important; min-height: 32px; }
+    .ocs-native-greeting-filter-tags { max-height: 96px; gap: 5px; }
+    .ocs-greeting-filter-chip { min-height: 30px; padding: 5px 9px; }
+    .ocs-native-greeting-toolbar-actions { display: flex; width: auto; justify-self: auto; gap: 3px; }
     .ocs-greeting-batch-mode .ocs-native-greeting-toolbar-batch-actions { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding-top: 5px; border-top: 1px solid color-mix(in srgb, var(--SmartThemeBorderColor, #777) 56%, transparent); }
     .ocs-native-greeting-toolbar .menu_button { display: grid; place-items: center; width: 100%; min-width: 0; min-height: 27px; margin: 0; padding: 0 3px; overflow: visible; font-size: .86em; line-height: 1; touch-action: manipulation; }
+    .ocs-native-greeting-search-row .menu_button { flex: 0 0 29px; width: 29px; min-width: 29px; min-height: 29px; }
     .ocs-greeting-batch-mode .ocs-native-greeting-toolbar-batch-actions .menu_button { min-height: 25px; font-size: .8em; }
     .ocs-native-greeting-expand { padding-left: 4px !important; }
     .ocs-native-greeting-select { min-width: 28px !important; min-height: 28px; margin-right: 2px !important; }
@@ -725,7 +755,8 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
     .alternate_grettings .alternate_greeting summary .menu_button { flex: 0 0 27px; min-width: 27px; min-height: 27px; padding: 0; }
     .alternate_grettings .alternate_greeting .delete_alternate_greeting span { display: none; }
     .ocs-native-greeting-number { display: none; }
-    .ocs-native-greeting-group-badge { max-width: 7em; margin-left: 0; }
+    .ocs-native-greeting-tag-list { flex-basis: 100%; margin-left: 0; }
+    .ocs-native-greeting-tag-badge { max-width: 7em; }
     .ocs-native-greeting-snapshot-badge { max-width: 8em; }
     .ocs-content-drawer-body { margin-left: 2px; padding-left: 6px; }
     .ocs-content-items { font-size: .94em; }
@@ -839,11 +870,25 @@ body.big-avatars #user_avatar_block :where(.avatar-container.ocs-persona-fav) .a
 .swipe_picker_popup .ocs-swipe-greeting-name { margin-left: 8px; font-weight: 600; }
 /* `.class + element` so a theme re-declaring `.text_pole { width: 100% }` after
    us cannot stretch it across the row and push the Go button off. */
-.swipe_picker_popup select.ocs-swipe-greeting-pick { flex: 0 1 auto; width: auto; min-width: 0; max-width: min(260px, 48vw); margin: 0; }
-.swipe_picker_popup select.ocs-swipe-greeting-group { flex: 0 1 auto; width: auto; min-width: 0; max-width: min(170px, 40vw); margin: 0; }
-/* Only once our dropdowns are there: the row is a single line of fixed
-   controls by default, and more would push the Go button off a phone screen. */
-.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick, .ocs-swipe-greeting-group) { flex-wrap: wrap; justify-content: center; row-gap: 8px; }
+.swipe_picker_popup select.ocs-swipe-greeting-pick { grid-area: name; box-sizing: border-box; width: 100%; min-width: 0; max-width: none; margin: 0; }
+.swipe_picker_popup .ocs-swipe-greeting-tags { grid-area: tags; justify-content: flex-start; max-height: 84px; }
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick, .ocs-swipe-greeting-tags) { display: grid; align-items: center; justify-content: stretch; gap: 8px 10px; }
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-tags):has(.ocs-swipe-greeting-pick) { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) auto; grid-template-areas: "tags tags tags" "name id go"; }
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-tags):not(:has(.ocs-swipe-greeting-pick)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tags tags" "id go"; }
+.swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick):not(:has(.ocs-swipe-greeting-tags)) { grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) auto; grid-template-areas: "name id go"; }
+.swipe_picker_popup .ocs-swipe-id-label { display: flex !important; flex-flow: row nowrap !important; grid-area: id; align-items: center; justify-content: flex-start !important; justify-self: stretch; gap: 10px; min-width: 0; margin: 0; text-align: left; white-space: nowrap; }
+.swipe_picker_popup .ocs-swipe-id-label > span { flex: 0 0 auto; }
+.swipe_picker_popup input.ocs-swipe-id-input { flex: 1 1 100px; box-sizing: border-box; width: 100% !important; min-width: 0; max-width: 150px; margin: 0; }
+.swipe_picker_popup .ocs-swipe-id-go { grid-area: go; justify-self: end; margin: 0; white-space: nowrap; }
 /* Two classes plus `!important`: the wrapper is a `flex-container`, and that
    is a display rule a theme may well have made important itself. */
 .swipe_picker_popup .ocs-swipe-filtered { display: none !important; }
+
+@media (max-width: 640px) {
+    .swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick, .ocs-swipe-greeting-tags) { gap: 8px; }
+    .swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-tags):has(.ocs-swipe-greeting-pick) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tags tags" "name name" "id go"; }
+    .swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-tags):not(:has(.ocs-swipe-greeting-pick)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tags tags" "id go"; }
+    .swipe_picker_popup .popup-controls:has(.ocs-swipe-greeting-pick):not(:has(.ocs-swipe-greeting-tags)) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "name name" "id go"; }
+    .swipe_picker_popup input.ocs-swipe-id-input { max-width: none; }
+    .swipe_picker_popup .ocs-swipe-id-go { justify-self: end; }
+}

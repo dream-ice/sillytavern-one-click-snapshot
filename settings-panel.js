@@ -103,7 +103,7 @@ export const FEATURES = [
             },
         ],
     },
-    { key: 'greeting', label: '开场白管理', note: '在酒馆的开场白编辑面板里加上搜索、分组、拖拽排序和批量操作。' },
+    { key: 'greeting', label: '开场白管理', note: '在酒馆的开场白编辑面板里加上搜索、多标签、拖拽排序和批量操作。' },
     { key: 'persona', label: 'User标签管理', note: '将原生标签管理系统注入用户管理之中。' },
 ];
 

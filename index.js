@@ -3038,28 +3038,32 @@ function reconcileGreetingCatalog(catalog, character = currentCharacter()) {
     const used = new Set();
     for (const entry of entries) {
         // The primary greeting is its own stable, native concept. Names and
-        // groups are intentionally only for alternate greetings.
+        // tags are intentionally only for alternate greetings.
         if (entry.kind === 'first') continue;
         const fingerprint = greetingFingerprint(entry.text);
         // Prefer the recorded native position when text is duplicated. The
         // move handler updates lastIndex before SillyTavern swaps the text,
-        // so identical greetings still keep their own names and groups.
+        // so identical greetings still keep their own names and tags.
         let metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.fingerprint === fingerprint && item.lastIndex === entry.index && !used.has(item.id));
         if (!metadata) metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.fingerprint === fingerprint && !used.has(item.id));
         // A direct edit in SillyTavern changes the fingerprint but leaves the
-        // native position intact. Keep the user's name/group in that case.
+        // native position intact. Keep the user's name/tags in that case.
         if (!metadata && entry.kind === 'alternate') {
             metadata = catalog.entries.find(item => item?.kind === 'alternate' && item.lastIndex === entry.index && !used.has(item.id));
         }
         if (!metadata) {
-            metadata = { id: makeId(), kind: entry.kind, name: '', group: '' };
+            metadata = { id: makeId(), kind: entry.kind, name: '', tags: [] };
             catalog.entries.push(metadata);
         }
         metadata.kind = entry.kind;
         metadata.fingerprint = fingerprint;
         metadata.lastIndex = entry.index;
         metadata.name = String(metadata.name ?? '').trim();
-        metadata.group = String(metadata.group ?? '').trim();
+        metadata.tags = [...new Set([
+            ...(Array.isArray(metadata.tags) ? metadata.tags : []),
+            ...(String(metadata.group ?? '').trim() ? [String(metadata.group).trim()] : []),
+        ].map(tag => String(tag ?? '').trim()).filter(Boolean))];
+        delete metadata.group;
         metadata.collapsed = metadata.collapsed === true;
         used.add(metadata.id);
         entry.metadata = metadata;
@@ -3082,7 +3086,7 @@ function greetingCandidates(character = currentCharacter()) {
     return effective.map((greeting, swipeIndex) => ({
         ...greeting,
         label: greetingDisplayLabel(greeting),
-        group: greeting.metadata?.group || '',
+        tags: [...(greeting.metadata?.tags ?? [])],
         swipeIndex,
         fingerprint: greetingFingerprint(greeting.text),
     })).filter(greeting => greeting.text.trim());
@@ -3128,39 +3132,171 @@ function saveGreetingCatalogState(character, catalog) {
     }
 }
 
+function greetingTagList(value) {
+    return [...new Set((Array.isArray(value) ? value : []).map(tag => String(tag ?? '').trim()).filter(Boolean))];
+}
+
+function greetingCatalogTags(catalog) {
+    return [...new Set((catalog?.entries ?? []).flatMap(item => greetingTagList(item?.tags ?? (item?.group ? [item.group] : []))))]
+        .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+}
+
+function toggleGreetingFilterChip(container, button) {
+    const kind = button.getAttribute('data-filter');
+    if (kind === 'all') {
+        container.querySelectorAll('.ocs-greeting-filter-chip').forEach(chip => chip.classList.remove('is-active'));
+        button.classList.add('is-active');
+    } else if (kind === 'untagged') {
+        const activate = !button.classList.contains('is-active');
+        container.querySelectorAll('.ocs-greeting-filter-chip').forEach(chip => chip.classList.remove('is-active'));
+        button.classList.toggle('is-active', activate);
+    } else {
+        button.classList.toggle('is-active');
+        container.querySelectorAll('.ocs-greeting-filter-chip[data-filter="all"], .ocs-greeting-filter-chip[data-filter="untagged"]').forEach(chip => chip.classList.remove('is-active'));
+        if (!container.querySelector('.ocs-greeting-filter-chip[data-filter="tag"].is-active')) {
+            container.querySelector('.ocs-greeting-filter-chip[data-filter="all"]')?.classList.add('is-active');
+        }
+    }
+}
+
+async function chooseGreetingTags({ available = [], selected = [], title = '设置开场白标签', batch = false } = {}) {
+    const choices = [...new Set([...available, ...selected].map(tag => String(tag ?? '').trim()).filter(Boolean))]
+        .sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    const picked = new Set(greetingTagList(selected));
+    const root = $('<div class="ocs-greeting-tag-editor"></div>');
+    if (batch) {
+        root.append('<p class="ocs-greeting-tag-hint">选择标签后，应用到已选开场白。</p>');
+        root.append('<div class="ocs-greeting-tag-mode" role="group" aria-label="标签操作"><button type="button" class="ocs-greeting-tag-mode-button is-active" data-mode="add">添加标签</button><button type="button" class="ocs-greeting-tag-mode-button" data-mode="remove">移除标签</button></div>');
+    } else {
+        root.append('<p class="ocs-greeting-tag-hint">可同时选择多个标签，也可以新建标签。</p>');
+    }
+    const chips = $('<div class="ocs-greeting-tag-options" role="group" aria-label="开场白标签"></div>');
+    const input = $('<input class="text_pole ocs-greeting-tag-input" type="text" maxlength="40" placeholder="输入新标签">');
+    const add = $('<button type="button" class="ocs-greeting-tag-add"><i class="fa-solid fa-plus"></i><span>添加</span></button>');
+    const createRow = $('<div class="ocs-greeting-tag-create"></div>').append(input, add);
+    root.append(chips, createRow);
+    root.on('click', '.ocs-greeting-tag-mode-button', function () {
+        root.find('.ocs-greeting-tag-mode-button').removeClass('is-active');
+        $(this).addClass('is-active');
+    });
+    const render = () => {
+        chips.empty();
+        if (!choices.length) chips.append('<span class="ocs-greeting-tag-empty">还没有标签，输入名称来创建</span>');
+        for (const tag of choices) {
+            const active = picked.has(tag);
+            chips.append($('<button type="button" class="ocs-greeting-tag-chip"></button>')
+                .toggleClass('is-active', active)
+                .attr({ 'aria-pressed': active ? 'true' : 'false', title: tag })
+                .append($('<span></span>').text(tag), active ? '<i class="fa-solid fa-check"></i>' : '')
+                .on('click', () => {
+                    if (picked.has(tag)) picked.delete(tag);
+                    else picked.add(tag);
+                    render();
+                }));
+        }
+    };
+    const addTag = () => {
+        const tag = String(input.val() ?? '').trim();
+        if (!tag) return;
+        if (!choices.includes(tag)) choices.push(tag);
+        picked.add(tag);
+        input.val('');
+        render();
+    };
+    add.on('click', addTag);
+    input.on('keydown', event => {
+        if (event.key !== 'Enter') return;
+        event.preventDefault();
+        addTag();
+    });
+    render();
+    const popup = new Popup(root.get(0), POPUP_TYPE.TEXT, title, {
+        wide: false,
+        leftAlign: true,
+        okButton: batch ? '应用标签' : '保存标签',
+        cancelButton: '取消',
+    });
+    popup.dlg.classList.add('ocs-dialog');
+    if (await popup.show() !== POPUP_RESULT.AFFIRMATIVE) return null;
+    return { tags: [...picked], mode: batch ? String(root.find('.ocs-greeting-tag-mode-button.is-active').attr('data-mode') ?? 'add') : 'replace' };
+}
+
 async function editGreetingMetadata(character, catalog, entry, field) {
-    const isName = field === 'name';
-    const value = isName
-        ? await Popup.show.input('重命名开场白', '名称只用于管理和快照绑定显示，不会改动开场白正文。', entry.metadata.name ?? '')
-        : await chooseGroup(entry.metadata.group, catalog.entries.map(item => String(item?.group ?? '').trim()), {
-            title: '设置开场白分组',
-            okButton: '确认分组',
+    if (field === 'name') {
+        const value = await Popup.show.input('重命名开场白', '名称只用于管理和快照绑定显示，不会改动开场白正文。', entry.metadata.name ?? '');
+        if (value === null) return;
+        entry.metadata.name = String(value).trim();
+        syncGreetingBindingLabel(character, entry);
+    } else {
+        const result = await chooseGreetingTags({
+            available: greetingCatalogTags(catalog),
+            selected: entry.metadata.tags,
+            title: '设置开场白标签',
         });
-    if (value === null) return;
-    entry.metadata[field] = String(value).trim();
+        if (!result) return;
+        entry.metadata.tags = result.tags;
+    }
     saveGreetingCatalogState(character, catalog);
-    if (isName) syncGreetingBindingLabel(character, entry);
     scheduleNativeGreetingDecoration();
 }
 
 function updateNativeGreetingFilter(root, entries) {
     const toolbar = root.find('.ocs-native-greeting-toolbar');
     if (!toolbar.length) return;
-    const groupSelect = toolbar.find('.ocs-native-greeting-filter-group');
+    const tagFilter = toolbar.find('.ocs-native-greeting-filter-tags');
     const search = toolbar.find('.ocs-native-greeting-filter-search');
-    const selectedGroup = String(groupSelect.val() ?? '__all__');
-    const groups = [...new Set(entries.map(entry => entry.metadata?.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-    groupSelect.empty().append('<option value="__all__">全部分组</option><option value="">未分组</option>');
-    for (const group of groups) groupSelect.append($('<option></option>').val(group).text(group));
-    groupSelect.val([...groupSelect.find('option').map((_, option) => option.value)].includes(selectedGroup) ? selectedGroup : '__all__');
+    const tags = [...new Set(entries.flatMap(entry => entry.metadata?.tags ?? []))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    const hasUntagged = entries.some(entry => !entry.metadata?.tags?.length);
+    let untaggedSelected = tagFilter.find('.ocs-greeting-filter-chip[data-filter="untagged"]').hasClass('is-active');
+    let selectedTags = new Set(tagFilter.find('.ocs-greeting-filter-chip.is-active[data-tag]').map((_, node) => String($(node).attr('data-tag'))).get());
+    selectedTags = new Set([...selectedTags].filter(tag => tags.includes(tag)));
+    const signature = JSON.stringify([tags, hasUntagged]);
+    if (tagFilter.attr('data-tags') !== signature) {
+        tagFilter.attr('data-tags', signature).empty();
+        const all = $('<button type="button" class="ocs-greeting-filter-chip" data-filter="all">全部</button>')
+            .toggleClass('is-active', selectedTags.size === 0 && !untaggedSelected)
+            .on('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleGreetingFilterChip(tagFilter.get(0), event.currentTarget);
+                updateNativeGreetingFilter(root, entries);
+            });
+        tagFilter.append(all);
+        if (hasUntagged) tagFilter.append($('<button type="button" class="ocs-greeting-filter-chip" data-filter="untagged">无标签</button>')
+            .toggleClass('is-active', untaggedSelected)
+            .on('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleGreetingFilterChip(tagFilter.get(0), event.currentTarget);
+                updateNativeGreetingFilter(root, entries);
+            }));
+        for (const tag of tags) {
+            tagFilter.append($('<button type="button" class="ocs-greeting-filter-chip" data-filter="tag"></button>')
+                .attr('data-tag', tag)
+                .toggleClass('is-active', selectedTags.has(tag))
+                .text(tag)
+                .on('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    toggleGreetingFilterChip(tagFilter.get(0), event.currentTarget);
+                    updateNativeGreetingFilter(root, entries);
+                }));
+        }
+    } else {
+        untaggedSelected = tagFilter.find('.ocs-greeting-filter-chip[data-filter="untagged"]').hasClass('is-active');
+        tagFilter.find('.ocs-greeting-filter-chip[data-filter="all"]').toggleClass('is-active', selectedTags.size === 0 && !untaggedSelected);
+        tagFilter.find('.ocs-greeting-filter-chip[data-filter="tag"]').each((_, node) => $(node).toggleClass('is-active', selectedTags.has(String($(node).attr('data-tag')))));
+    }
+    const untaggedOnly = tagFilter.find('.ocs-greeting-filter-chip[data-filter="untagged"]').hasClass('is-active');
     const query = String(search.val() ?? '').trim().toLocaleLowerCase();
     root.find('.alternate_greeting').each((_, node) => {
         const block = $(node);
         const index = Number(block.attr('data-index'));
         const entry = entries.find(item => item.index === index);
-        const inGroup = selectedGroup === '__all__' || entry?.metadata?.group === selectedGroup;
-        const haystack = `${entry?.metadata?.name ?? ''} ${entry?.metadata?.group ?? ''} ${entry?.text ?? ''}`.toLocaleLowerCase();
-        block.toggle(inGroup && (!query || haystack.includes(query)));
+        const entryTags = entry?.metadata?.tags ?? [];
+        const matchesTag = untaggedOnly ? !entryTags.length : [...selectedTags].every(tag => entryTags.includes(tag));
+        const haystack = `${entry?.metadata?.name ?? ''} ${entryTags.join(' ')} ${entry?.text ?? ''}`.toLocaleLowerCase();
+        block.toggle(matchesTag && (!query || haystack.includes(query)));
     });
 }
 
@@ -3253,10 +3389,8 @@ function refreshNativeGreetingModes(root) {
     root.toggleClass('ocs-greeting-batch-mode', batchMode);
     root.toggleClass('ocs-greeting-drag-mode', dragMode);
     root.find('.ocs-native-greeting-batch').toggleClass('active', batchMode);
-    root.find('.ocs-native-greeting-drag-toggle').toggleClass('active', dragMode);
     root.find('.ocs-native-greeting-batch').attr('title', batchMode ? '退出批量操作' : '批量操作');
-    root.find('.ocs-native-greeting-drag-toggle').attr('title', dragMode ? '切换为上下键排序' : '切换为拖拽排序');
-    root.find('.move_up_alternate_greeting, .move_down_alternate_greeting').toggle(!dragMode);
+    root.find('.move_up_alternate_greeting, .move_down_alternate_greeting').hide();
 }
 
 function applyNativeGreetingDragOrder(root, character = currentCharacter()) {
@@ -3324,7 +3458,7 @@ function setNativeGreetingDragMode(root, enabled) {
         root.data('ocsBatchMode', false);
         root.find('.ocs-native-greeting-select').each((_, node) => setNativeGreetingSelected($(node), false));
         root.find('.ocs-native-greeting-filter-search').val('').trigger('input');
-        root.find('.ocs-native-greeting-filter-group').val('__all__').trigger('change');
+        root.find('.ocs-greeting-filter-chip[data-filter="all"]').trigger('click');
         list.sortable({
             items: '> .alternate_greeting',
             handle: '.ocs-native-greeting-drag-handle',
@@ -3348,18 +3482,25 @@ function setNativeGreetingDragMode(root, enabled) {
     refreshNativeGreetingModes(root);
 }
 
-async function applyNativeGreetingBatchGroup(root) {
+async function applyNativeGreetingBatchTags(root) {
     const character = currentCharacter();
     const indexes = selectedNativeGreetingIndexes(root);
     if (!character?.avatar || !indexes.length) return;
     const catalog = greetingCatalogState(character);
     const entries = reconcileGreetingCatalog(catalog, character);
-    const group = await chooseGroup('', catalog.entries.map(item => String(item?.group ?? '').trim()), {
-        title: `为 ${indexes.length} 条开场白设置分组`,
-        okButton: '确认分组',
+    const result = await chooseGreetingTags({
+        available: greetingCatalogTags(catalog),
+        title: `为 ${indexes.length} 条开场白设置标签`,
+        batch: true,
     });
-    if (group === null) return;
-    for (const entry of entries) if (entry.kind === 'alternate' && indexes.includes(entry.index)) entry.metadata.group = group;
+    if (!result || !result.tags.length) return;
+    for (const entry of entries) {
+        if (entry.kind !== 'alternate' || !indexes.includes(entry.index)) continue;
+        const current = greetingTagList(entry.metadata.tags);
+        entry.metadata.tags = result.mode === 'remove'
+            ? current.filter(tag => !result.tags.includes(tag))
+            : [...new Set([...current, ...result.tags])];
+    }
     saveGreetingCatalogState(character, catalog);
     scheduleNativeGreetingDecoration();
 }
@@ -3406,13 +3547,13 @@ function decorateNativeAlternateGreetings() {
         root.children('.title_restorable').find('.ocs-native-greeting-expand, .ocs-native-greeting-collapse').remove();
 
         if (!root.find('.ocs-native-greeting-toolbar').length) {
-            const toolbar = $('<div class="ocs-native-greeting-toolbar"><div class="ocs-native-greeting-toolbar-filters"><input class="text_pole ocs-native-greeting-filter-search" type="search" placeholder="搜索名称、分组或开场白内容"><select class="text_pole ocs-native-greeting-filter-group" title="按分组筛选"><option value="__all__">全部分组</option></select></div><div class="ocs-native-greeting-toolbar-actions"><div class="menu_button ocs-native-greeting-expand fa-solid fa-angles-down" title="展开全部开场白"></div><div class="menu_button ocs-native-greeting-collapse fa-solid fa-angles-up" title="收起全部开场白"></div><div class="menu_button ocs-native-greeting-drag-toggle fa-solid fa-up-down-left-right" title="切换拖拽排序"></div><div class="menu_button ocs-native-greeting-batch fa-solid fa-list-check" title="批量操作"></div></div><div class="ocs-native-greeting-toolbar-batch-actions ocs-native-greeting-batch-only"><div class="menu_button ocs-native-greeting-batch-all fa-solid fa-check-double" title="全选 / 取消全选"></div><div class="menu_button ocs-native-greeting-batch-group fa-solid fa-folder-tree" title="为选中开场白分组"></div><div class="menu_button ocs-native-greeting-batch-delete fa-solid fa-trash" title="删除选中开场白"></div></div></div>');
+            const toolbar = $('<div class="ocs-native-greeting-toolbar"><div class="ocs-native-greeting-search-row"><input class="text_pole ocs-native-greeting-filter-search" type="search" placeholder="搜索名称、标签或开场白内容"><div class="ocs-native-greeting-toolbar-actions"><div class="menu_button ocs-native-greeting-expand fa-solid fa-angles-down" title="展开全部开场白"></div><div class="menu_button ocs-native-greeting-collapse fa-solid fa-angles-up" title="收起全部开场白"></div><div class="menu_button ocs-native-greeting-batch fa-solid fa-list-check" title="批量操作"></div></div></div><div class="ocs-greeting-filter-wrap"><div class="ocs-native-greeting-filter-tags" aria-label="按标签筛选"></div></div><div class="ocs-native-greeting-toolbar-batch-actions ocs-native-greeting-batch-only"><div class="menu_button ocs-native-greeting-batch-all fa-solid fa-check-double" title="全选 / 取消全选"></div><div class="menu_button ocs-native-greeting-batch-tags fa-solid fa-tags" title="为选中开场白添加或移除标签"></div><div class="menu_button ocs-native-greeting-batch-delete fa-solid fa-trash" title="删除选中开场白"></div></div></div>');
             list.before(toolbar);
         }
         const toolbar = root.find('.ocs-native-greeting-toolbar');
         toolbar
-            .off('input.oneClickSnapshotGreetingFilter change.oneClickSnapshotGreetingFilter', 'select, input')
-            .on('input.oneClickSnapshotGreetingFilter change.oneClickSnapshotGreetingFilter', 'select, input', () => updateNativeGreetingFilter(root, entries));
+            .off('.oneClickSnapshotGreetingFilter')
+            .on('input.oneClickSnapshotGreetingFilter', '.ocs-native-greeting-filter-search', () => updateNativeGreetingFilter(root, entries));
         toolbar.find('.ocs-native-greeting-expand')
             .off('click.oneClickSnapshotGreetingExpand')
             .on('click.oneClickSnapshotGreetingExpand', async event => {
@@ -3429,20 +3570,14 @@ function decorateNativeAlternateGreetings() {
                 event.stopPropagation();
                 setNativeGreetingDetailsOpen(root, false);
             });
-        toolbar.find('.ocs-native-greeting-drag-toggle')
-            .off('click.oneClickSnapshotGreetingDrag')
-            .on('click.oneClickSnapshotGreetingDrag', event => {
-                event.preventDefault();
-                event.stopPropagation();
-                setNativeGreetingDragMode(root, root.data('ocsDragMode') !== true);
-            });
         toolbar.find('.ocs-native-greeting-batch')
             .off('click.oneClickSnapshotGreetingBatch')
             .on('click.oneClickSnapshotGreetingBatch', event => {
                 event.preventDefault();
                 event.stopPropagation();
                 const enabled = root.data('ocsBatchMode') !== true;
-                if (enabled && root.data('ocsDragMode') === true) setNativeGreetingDragMode(root, false);
+                if (enabled) setNativeGreetingDragMode(root, false);
+                else setNativeGreetingDragMode(root, true);
                 root.data('ocsBatchMode', enabled);
                 root.find('.ocs-native-greeting-select').each((_, node) => setNativeGreetingSelected($(node), false));
                 refreshNativeGreetingModes(root);
@@ -3456,12 +3591,12 @@ function decorateNativeAlternateGreetings() {
                 const selectAll = checks.length > 0 && checks.filter('.is-selected').length !== checks.length;
                 checks.each((_, node) => setNativeGreetingSelected($(node), selectAll));
             });
-        toolbar.find('.ocs-native-greeting-batch-group')
-            .off('click.oneClickSnapshotGreetingBatchGroup')
-            .on('click.oneClickSnapshotGreetingBatchGroup', async event => {
+        toolbar.find('.ocs-native-greeting-batch-tags')
+            .off('click.oneClickSnapshotGreetingBatchTags')
+            .on('click.oneClickSnapshotGreetingBatchTags', async event => {
                 event.preventDefault();
                 event.stopPropagation();
-                await applyNativeGreetingBatchGroup(root);
+                await applyNativeGreetingBatchTags(root);
             });
         toolbar.find('.ocs-native-greeting-batch-delete')
             .off('click.oneClickSnapshotGreetingBatchDelete')
@@ -3516,10 +3651,14 @@ function decorateNativeAlternateGreetings() {
                 dragHandle = $('<div class="menu_button ocs-native-greeting-drag-handle fa-solid fa-grip-vertical" title="拖拽排序"></div>');
                 controls.find('.move_up_alternate_greeting').before(dragHandle);
             }
-            titleRow.find('.ocs-native-greeting-number, .ocs-native-greeting-group-badge, .ocs-native-greeting-snapshot-badge').remove();
+            titleRow.find('.ocs-native-greeting-number, .ocs-native-greeting-tag-list, .ocs-native-greeting-snapshot-badge').remove();
             summaryTitle.text(entry.metadata.name || `其他开场白 #${index + 1}`);
             if (entry.metadata.name) titleRow.append($('<small class="ocs-native-greeting-number"></small>').text(`#${index + 1}`));
-            if (entry.metadata.group) titleRow.append($('<small class="ocs-native-greeting-group-badge"></small>').text(entry.metadata.group));
+            if (entry.metadata.tags?.length) {
+                const tagList = $('<span class="ocs-native-greeting-tag-list"></span>');
+                for (const tag of entry.metadata.tags) tagList.append($('<small class="ocs-native-greeting-tag-badge"></small>').text(tag));
+                titleRow.append(tagList);
+            }
 
             // Which snapshot this greeting opens with. Without it the binding is
             // only visible from the snapshot's own card, so there is no way to
@@ -3534,13 +3673,13 @@ function decorateNativeAlternateGreetings() {
             }
 
             let renameButton = controls.find('.ocs-native-greeting-rename');
-            let groupButton = controls.find('.ocs-native-greeting-group-edit');
+            let tagsButton = controls.find('.ocs-native-greeting-tags-edit');
             if (!renameButton.length) {
                 renameButton = $('<div class="menu_button ocs-native-greeting-rename fa-solid fa-pen" title="重命名开场白"></div>');
-                groupButton = $('<div class="menu_button ocs-native-greeting-group-edit fa-solid fa-folder-tree" title="设置开场白分组"></div>');
+                tagsButton = $('<div class="menu_button ocs-native-greeting-tags-edit fa-solid fa-tags" title="设置开场白标签"></div>');
                 const before = controls.find('.move_up_alternate_greeting');
-                if (before.length) before.before(renameButton, groupButton);
-                else controls.find('.delete_alternate_greeting').before(renameButton, groupButton);
+                if (before.length) before.before(renameButton, tagsButton);
+                else controls.find('.delete_alternate_greeting').before(renameButton, tagsButton);
             }
             renameButton
                 .off('click.oneClickSnapshotGreetingRename')
@@ -3549,16 +3688,20 @@ function decorateNativeAlternateGreetings() {
                     event.stopPropagation();
                     await editGreetingMetadata(character, catalog, entry, 'name');
                 });
-            groupButton
-                .off('click.oneClickSnapshotGreetingGroup')
-                .on('click.oneClickSnapshotGreetingGroup', async event => {
+            tagsButton
+                .off('click.oneClickSnapshotGreetingTags')
+                .on('click.oneClickSnapshotGreetingTags', async event => {
                     event.preventDefault();
                     event.stopPropagation();
-                    await editGreetingMetadata(character, catalog, entry, 'group');
+                    await editGreetingMetadata(character, catalog, entry, 'tags');
                 });
         });
         refreshNativeGreetingModes(root);
         updateNativeGreetingFilter(root, entries);
+        if (root.data('ocsGreetingDragInitialized') !== true) {
+            root.data('ocsGreetingDragInitialized', true);
+            setNativeGreetingDragMode(root, true);
+        }
     });
 }
 
@@ -3638,18 +3781,18 @@ function installGreetingCatalogIntegration() {
 const SWIPE_ID_INPUT_PREFIX = 'swipe_picker_id_';
 
 /**
- * The name and group the user gave each opening greeting, keyed by swipe index.
+ * The name and tags the user gave each opening greeting, keyed by swipe index.
  *
  * The swipe-to-greeting relationship is the one the greeting snapshots use:
  * the map captured when the chat began if there is one, so a card edited since
- * does not shift everything onto the wrong swipe. Name and group are read live
- * and matched by text, so a rename or regroup shows straight away.
+ * does not shift everything onto the wrong swipe. Name and tags are read live
+ * and matched by text, so a rename or tag edit shows straight away.
  *
  * Only real names count. The fallback "备选开场白 N" is not something the
  * user wrote, and the picker already numbers every swipe.
  *
  * @param {object} character The open character
- * @returns {Map<number, {name: string, group: string}>}
+ * @returns {Map<number, {name: string, tags: string[]}>}
  */
 function openingGreetingInfo(character) {
     const live = greetingCandidates(character);
@@ -3659,18 +3802,18 @@ function openingGreetingInfo(character) {
             ?? live.find(item => item.key === candidate.key);
         info.set(Number(candidate.swipeIndex), {
             name: String(current?.metadata?.name ?? '').trim(),
-            group: String(current?.metadata?.group ?? '').trim(),
+            tags: greetingTagList(current?.metadata?.tags),
         });
     }
     return info;
 }
 
-/** The group filter's "no filter" value, as the greeting panel spells it. */
-const ALL_GREETING_GROUPS = '__all__';
+/** The tag filter's "no filter" value, as the greeting panel spells it. */
+const ALL_GREETING_TAGS = '__all__';
 
 /**
  * Adds the greeting catalog to SillyTavern's swipe picker for the opening
- * message: each swipe's name beside its number, a group filter, and a dropdown
+ * message: each swipe's name beside its number, a tag filter, and a dropdown
  * that jumps by name.
  *
  * Idempotent, because it runs again whenever the picker redraws its list --
@@ -3682,8 +3825,11 @@ const ALL_GREETING_GROUPS = '__all__';
 function decorateSwipePicker(dialog) {
     const input = dialog.querySelector(`input[id^="${SWIPE_ID_INPUT_PREFIX}"]`);
     if (!(input instanceof HTMLInputElement)) return;
+    input.classList.add('ocs-swipe-id-input');
+    dialog.querySelector(`label[for="${input.id}"]`)?.classList.add('ocs-swipe-id-label');
+    dialog.querySelector('.popup-button-ok')?.classList.add('ocs-swipe-id-go');
     const removeControls = () => {
-        dialog.querySelectorAll('.ocs-swipe-greeting-pick, .ocs-swipe-greeting-group').forEach(node => node.remove());
+        dialog.querySelectorAll('.ocs-swipe-greeting-pick, .ocs-swipe-greeting-tags').forEach(node => node.remove());
         dialog.querySelectorAll('.ocs-swipe-filtered').forEach(node => node.classList.remove('ocs-swipe-filtered'));
     };
 
@@ -3697,12 +3843,12 @@ function decorateSwipePicker(dialog) {
 
     const info = openingGreetingInfo(character);
     const named = [...info].filter(([, item]) => item.name).sort((a, b) => a[0] - b[0]);
-    // Same list and order as the greeting panel's own group filter.
-    const groups = [...new Set([...info.values()].map(item => item.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    // Same labels as the greeting panel's own tag filter.
+    const tags = [...new Set([...info.values()].flatMap(item => item.tags))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
     // Fewer swipes than greetings means one was deleted, and every index after
-    // it has shifted. Better nothing than names and groups on the wrong ones.
+    // it has shifted. Better nothing than names and tags on the wrong ones.
     const expected = Math.max(-1, ...openingGreetingCandidates(character).map(item => Number(item.swipeIndex))) + 1;
-    if ((!named.length && !groups.length) || (opening.swipes?.length ?? 0) < expected) return removeControls();
+    if ((!named.length && !tags.length) || (opening.swipes?.length ?? 0) < expected) return removeControls();
 
     for (const block of dialog.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
         const name = info.get(Number(block.getAttribute('data-swipe-id')))?.name;
@@ -3720,30 +3866,84 @@ function decorateSwipePicker(dialog) {
     // to its control, which would steal focus from the dropdowns.
     const anchor = dialog.querySelector(`label[for="${input.id}"]`) ?? input;
 
-    let groupPick = dialog.querySelector('.ocs-swipe-greeting-group');
-    if (!groups.length) {
-        groupPick?.remove();
-        groupPick = null;
-    } else if (!(groupPick instanceof HTMLSelectElement)) {
-        groupPick = document.createElement('select');
-        groupPick.className = 'text_pole ocs-swipe-greeting-group';
-        groupPick.title = '按开场白分组筛选';
-        groupPick.append(new Option('全部分组', ALL_GREETING_GROUPS), new Option('未分组', ''));
-        for (const group of groups) groupPick.append(new Option(group, group));
-        groupPick.value = ALL_GREETING_GROUPS;
-        groupPick.addEventListener('change', () => decorateSwipePicker(dialog));
-        anchor.before(groupPick);
+    let tagFilter = dialog.querySelector('.ocs-swipe-greeting-tags');
+    if (!tags.length) {
+        tagFilter?.remove();
+        tagFilter = null;
+    } else if (!(tagFilter instanceof HTMLElement)) {
+        tagFilter = document.createElement('div');
+        tagFilter.className = 'ocs-swipe-greeting-tags';
+        tagFilter.setAttribute('role', 'group');
+        tagFilter.setAttribute('aria-label', '按开场白标签筛选');
+        anchor.before(tagFilter);
     }
-    const group = groupPick instanceof HTMLSelectElement ? groupPick.value : ALL_GREETING_GROUPS;
+    const tagSignature = `${tags.join('\u0000')}\u0001${[...info.values()].some(item => !item.tags.length)}`;
+    if (tagFilter instanceof HTMLElement && tagFilter.dataset.tags !== tagSignature) {
+        const selectedBefore = new Set([...tagFilter.querySelectorAll('.ocs-greeting-filter-chip.is-active[data-tag]')].map(node => node.dataset.tag));
+        const untaggedBefore = tagFilter.querySelector('.ocs-greeting-filter-chip[data-filter="untagged"]')?.classList.contains('is-active') ?? false;
+        tagFilter.dataset.tags = tagSignature;
+        tagFilter.replaceChildren();
+        const allButton = document.createElement('button');
+        allButton.type = 'button';
+        allButton.className = 'ocs-greeting-filter-chip';
+        allButton.dataset.filter = 'all';
+        allButton.textContent = '全部';
+        allButton.classList.toggle('is-active', selectedBefore.size === 0 && !untaggedBefore);
+        allButton.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            toggleGreetingFilterChip(tagFilter, allButton);
+            decorateSwipePicker(dialog);
+        });
+        tagFilter.append(allButton);
+        if ([...info.values()].some(item => !item.tags.length)) {
+            const noTagButton = document.createElement('button');
+            noTagButton.type = 'button';
+            noTagButton.className = 'ocs-greeting-filter-chip';
+            noTagButton.dataset.filter = 'untagged';
+            noTagButton.textContent = '无标签';
+            noTagButton.classList.toggle('is-active', untaggedBefore);
+            noTagButton.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleGreetingFilterChip(tagFilter, noTagButton);
+                decorateSwipePicker(dialog);
+            });
+            tagFilter.append(noTagButton);
+        }
+        for (const label of tags) {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ocs-greeting-filter-chip';
+            button.dataset.filter = 'tag';
+            button.dataset.tag = label;
+            button.textContent = label;
+            button.classList.toggle('is-active', selectedBefore.has(label));
+            button.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleGreetingFilterChip(tagFilter, button);
+                decorateSwipePicker(dialog);
+            });
+            tagFilter.append(button);
+        }
+    }
+    const selectedTags = new Set(tagFilter instanceof HTMLElement
+        ? [...tagFilter.querySelectorAll('.ocs-greeting-filter-chip.is-active[data-tag]')].map(node => node.dataset.tag)
+        : []);
+    const untaggedOnly = tagFilter instanceof HTMLElement
+        && tagFilter.querySelector('.ocs-greeting-filter-chip[data-filter="untagged"]')?.classList.contains('is-active');
     // Swipes past the last greeting were generated, not picked from the card,
-    // so they belong to no group and only show when nothing is filtered.
-    const inGroup = index => group === ALL_GREETING_GROUPS || (info.has(index) && info.get(index).group === group);
+    // so they belong to no tag and only show when nothing is filtered.
+    const inTag = index => untaggedOnly
+        ? info.has(index) && !info.get(index).tags.length
+        : [...selectedTags].every(tag => info.get(index)?.tags.includes(tag));
 
     // A class rather than an inline `display`: the block's wrapper is a
     // `flex-container`, and a theme declaring that with `!important` would win.
     for (const block of dialog.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
         const wrapper = block.closest('.select_chat_block_wrapper') ?? block;
-        wrapper.classList.toggle('ocs-swipe-filtered', !inGroup(Number(block.getAttribute('data-swipe-id'))));
+        wrapper.classList.toggle('ocs-swipe-filtered', !inTag(Number(block.getAttribute('data-swipe-id'))));
     }
 
     let pick = dialog.querySelector('.ocs-swipe-greeting-pick');
@@ -3764,21 +3964,22 @@ function decorateSwipePicker(dialog) {
         });
         anchor.before(pick);
     }
-    // Refilled only when the group changes. Refilling is itself a change to the
+    // Refilled only when the tag filter changes. Refilling is itself a change to the
     // page, and doing it on every pass would retrigger the observer that runs
     // this one.
-    if (pick.dataset.group !== group) {
-        pick.dataset.group = group;
+    const nameListFilter = `${untaggedOnly ? '__untagged__' : [...selectedTags].sort().join('\u0000')}`;
+    if (pick.dataset.tag !== nameListFilter) {
+        pick.dataset.tag = nameListFilter;
         pick.replaceChildren(
             new Option('按名称选择…', ''),
-            ...named.filter(([index]) => index < opening.swipes.length && inGroup(index))
+            ...named.filter(([index]) => index < opening.swipes.length && inTag(index))
                 .map(([index, item]) => new Option(`#${index + 1} ${item.name}`, String(index))),
         );
     }
 
     // Follow the selection however it was made -- clicking a swipe, typing a
     // number, or picking here -- and fall back to the prompt when the selected
-    // swipe has no name or sits outside the group.
+    // swipe has no name or sits outside the selected tag.
     const selected = dialog.querySelector('.swipe_picker_block[highlight]')?.getAttribute('data-swipe-id') ?? '';
     pick.value = selected !== '' && [...pick.options].some(option => option.value === selected) ? selected : '';
 }
@@ -3874,36 +4075,52 @@ async function chooseGreetingCandidate(character, { onlySnapshotId = null, title
         toastr.warning(onlySnapshotId ? '当前角色没有可解绑的开场白。' : '当前角色还没有可绑定的开场白。', '一键快照');
         return null;
     }
-    const root = $('<div class="ocs-greeting-choice"><div class="ocs-greeting-choice-groups"><span class="ocs-greeting-choice-group-title">分组</span><div class="ocs-greeting-choice-group-tags" role="group" aria-label="选择开场白分组"></div></div><label class="ocs-greeting-choice-label">开场白<select class="text_pole ocs-greeting-choice-select"></select></label><p class="ocs-greeting-choice-preview"></p></div>');
-    const groupTags = root.find('.ocs-greeting-choice-group-tags');
+    const root = $('<div class="ocs-greeting-choice"><div class="ocs-greeting-choice-tags"><div class="ocs-greeting-choice-tag-list" role="group" aria-label="选择开场白标签"></div></div><label class="ocs-greeting-choice-label">开场白<select class="text_pole ocs-greeting-choice-select"></select></label><p class="ocs-greeting-choice-preview"></p></div>');
+    const tagButtons = root.find('.ocs-greeting-choice-tag-list');
     const select = root.find('.ocs-greeting-choice-select');
-    const groups = [...new Set(candidates.map(candidate => candidate.group).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
-    const groupOptions = [{ key: '__all__', label: '全部' }];
-    if (candidates.some(candidate => !candidate.group)) groupOptions.push({ key: '', label: '未分组' });
-    groupOptions.push(...groups.map(group => ({ key: group, label: group })));
-    let selectedGroup = '__all__';
+    const tags = [...new Set(candidates.flatMap(candidate => candidate.tags))].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+    const tagOptions = [{ key: ALL_GREETING_TAGS, label: '全部' }];
+    if (candidates.some(candidate => !candidate.tags.length)) tagOptions.push({ key: '__untagged__', label: '无标签' });
+    tagOptions.push(...tags.map(tag => ({ key: tag, label: tag })));
+    const selectedTags = new Set();
+    let untaggedOnly = false;
     const renderCandidates = () => {
-        const filtered = candidates.filter(candidate => selectedGroup === '__all__' || candidate.group === selectedGroup);
+        const filtered = candidates.filter(candidate => untaggedOnly
+            ? !candidate.tags.length
+            : [...selectedTags].every(tag => candidate.tags.includes(tag)));
         select.empty();
         for (const candidate of filtered) select.append($('<option></option>').val(candidate.key).text(candidate.label));
         root.find('.ocs-greeting-choice-preview').text(filtered.find(candidate => candidate.key === select.val())?.text ?? '');
+        tagButtons.find('.ocs-greeting-choice-tag').each((_, node) => {
+            const button = $(node);
+            const key = String(button.attr('data-tag') ?? '');
+            const active = key === ALL_GREETING_TAGS ? !selectedTags.size && !untaggedOnly
+                : key === '__untagged__' ? untaggedOnly
+                    : selectedTags.has(key);
+            button.toggleClass('is-active', active).attr('aria-pressed', active ? 'true' : 'false');
+        });
     };
-    for (const option of groupOptions) {
-        const tag = $('<button type="button" class="ocs-greeting-choice-group-tag"></button>')
+    for (const option of tagOptions) {
+        const tag = $('<button type="button" class="ocs-greeting-choice-tag"></button>')
             .text(option.label)
-            .attr({ 'data-group': option.key, 'aria-pressed': option.key === selectedGroup ? 'true' : 'false' })
-            .toggleClass('is-active', option.key === selectedGroup)
+            .attr({ 'data-tag': option.key, 'aria-pressed': 'false' })
             .on('click', event => {
                 event.preventDefault();
                 event.stopPropagation();
-                selectedGroup = option.key;
-                groupTags.find('.ocs-greeting-choice-group-tag')
-                    .removeClass('is-active')
-                    .attr('aria-pressed', 'false');
-                tag.addClass('is-active').attr('aria-pressed', 'true');
+                if (option.key === ALL_GREETING_TAGS) {
+                    selectedTags.clear();
+                    untaggedOnly = false;
+                } else if (option.key === '__untagged__') {
+                    selectedTags.clear();
+                    untaggedOnly = !untaggedOnly;
+                } else {
+                    untaggedOnly = false;
+                    if (selectedTags.has(option.key)) selectedTags.delete(option.key);
+                    else selectedTags.add(option.key);
+                }
                 renderCandidates();
             });
-        groupTags.append(tag);
+        tagButtons.append(tag);
     }
     select.on('change', () => root.find('.ocs-greeting-choice-preview').text(candidates.find(candidate => candidate.key === select.val())?.text ?? ''));
     renderCandidates();
