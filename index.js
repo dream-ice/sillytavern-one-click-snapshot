@@ -589,17 +589,92 @@ function worldbookEntryGroupRecord(worldbookName) {
     return { groups: record.groups, entries: record.entries && typeof record.entries === 'object' ? record.entries : {} };
 }
 
-/** Whether entry group records exist at all on this install. */
+/** Whether the transfer settings contain the entry-group store. */
 function hasWorldbookEntryGroupRecords() {
     const records = getPresetTransferSettings()?.worldbookEntryGroups;
     return Boolean(records && typeof records === 'object');
+}
+
+/** Add each group's inherited switch state and the members beneath it. */
+function withGroupHierarchy(gates, memberKey) {
+    const byId = new Map(gates.map(gate => [String(gate.id), gate]));
+    const parentOf = gate => byId.get(String(gate?.parentId ?? '')) ?? null;
+    const isDescendantOf = (gate, ancestorId) => {
+        const visited = new Set();
+        let current = gate;
+        while (current?.parentId && !visited.has(String(current.id))) {
+            const parentId = String(current.parentId);
+            if (parentId === String(ancestorId)) return true;
+            visited.add(String(current.id));
+            current = byId.get(parentId);
+        }
+        return false;
+    };
+    const powered = (gate, visited = new Set()) => {
+        if (!gate || gate.enabled === false || visited.has(String(gate.id))) return false;
+        visited.add(String(gate.id));
+        const parent = parentOf(gate);
+        return !parent || powered(parent, visited);
+    };
+    const depth = (gate, visited = new Set()) => {
+        if (!gate?.parentId || visited.has(String(gate.id))) return 0;
+        visited.add(String(gate.id));
+        const parent = parentOf(gate);
+        return parent ? depth(parent, visited) + 1 : 0;
+    };
+
+    return gates.map(gate => {
+        const subtree = gates
+            .filter(candidate => String(candidate.id) === String(gate.id) || isDescendantOf(candidate, gate.id))
+            .flatMap(candidate => candidate[memberKey] ?? []);
+        return {
+            ...gate,
+            powered: powered(gate),
+            depth: depth(gate),
+            [`subtree${memberKey[0].toUpperCase()}${memberKey.slice(1)}`]: [...new Set(subtree.map(String))],
+        };
+    }).filter(gate => gate[`subtree${memberKey[0].toUpperCase()}${memberKey.slice(1)}`].length > 0);
+}
+
+function groupLabelMap(groups) {
+    const byId = new Map((groups ?? []).map(group => [String(group?.id ?? ''), group]));
+    const labels = new Map();
+    const labelFor = (id, visited = new Set()) => {
+        const key = String(id ?? '');
+        if (!key || visited.has(key)) return '';
+        if (labels.has(key)) return labels.get(key);
+        const group = byId.get(key);
+        if (!group) return '';
+        visited.add(key);
+        const name = String(group.name || group.title || '未命名分组');
+        const parent = group.parentId ? labelFor(group.parentId, visited) : '';
+        const label = parent ? `${parent} › ${name}` : name;
+        labels.set(key, label);
+        return label;
+    };
+    for (const id of byId.keys()) labelFor(id);
+    return labels;
+}
+
+function snapshotGroupEnabledForMember(gates, memberKey, memberId) {
+    const key = String(memberId);
+    const byId = new Map((gates ?? []).map(gate => [String(gate.id), gate]));
+    let gate = (gates ?? []).find(item => (item[memberKey] ?? []).some(id => String(id) === key));
+    const visited = new Set();
+    while (gate && !visited.has(String(gate.id))) {
+        const gateId = String(gate.id);
+        visited.add(gateId);
+        if (gate.enabled === false) return false;
+        gate = gate.parentId ? byId.get(String(gate.parentId)) : null;
+    }
+    return true;
 }
 
 function getPresetTransferWorldbookEntryGroups(worldbookName, orderedUids, data = null) {
     try {
         const record = worldbookEntryGroupRecord(worldbookName);
         if (record) {
-            const names = new Map(record.groups.map(group => [String(group?.id ?? ''), String(group?.name ?? '').trim() || '未命名分组']));
+            const names = groupLabelMap(record.groups);
             const assignments = new Map();
             for (const [uid, meta] of Object.entries(record.entries)) {
                 const name = names.get(String(meta?.groupId ?? ''));
@@ -638,15 +713,16 @@ function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data =
         const record = worldbookEntryGroupRecord(worldbookName);
         if (record) {
             const uids = orderedUids.map(String);
-            return record.groups.map(group => {
+            return withGroupHierarchy(record.groups.map(group => {
                 const id = String(group?.id ?? '');
                 return {
                     id,
                     name: String(group?.name ?? '').trim() || '未命名分组',
+                    parentId: group?.parentId ? String(group.parentId) : null,
                     uids: uids.filter(uid => String(record.entries[uid]?.groupId ?? '') === id),
                     enabled: group?.enabled !== false,
                 };
-            }).filter(gate => gate.id && gate.uids.length);
+            }).filter(gate => gate.id), 'uids');
         }
         const transfer = getPresetTransferSettings();
         const raw = transfer?.worldbookEntryGroupingsBackup?.[worldbookName]
@@ -667,11 +743,12 @@ function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data =
             gates.push({
                 id: String(grouping?.id ?? `${worldbookName}:${index}:${members[0]}:${members.at(-1)}`),
                 name: String(grouping?.name ?? grouping?.groupName ?? '未命名分组'),
+                parentId: null,
                 uids: members,
                 enabled: grouping?.gate !== false,
             });
         }
-        return gates;
+        return withGroupHierarchy(gates, 'uids');
     } catch {
         return [];
     }
@@ -724,7 +801,7 @@ function hasUsablePresetGroupState(state) {
 function presetGroupMapFromState(state) {
     if (!state || typeof state !== 'object') return new Map();
     const result = new Map();
-    const names = new Map((state.groups ?? []).map((group, index) => [String(group.id ?? index), group.name || group.title || '未命名分组']));
+    const names = groupLabelMap((state.groups ?? []).map((group, index) => ({ ...group, id: group.id ?? index })));
     for (const [id, meta] of Object.entries(state.prompts ?? state.entries ?? {})) {
         const groupId = meta?.groupId ?? meta?.group ?? meta;
         result.set(id, names.get(String(groupId)) ?? (typeof groupId === 'string' ? groupId : '未分组'));
@@ -732,8 +809,9 @@ function presetGroupMapFromState(state) {
     // Compatibility with member-list grouping data: { groups: [{ name,
     // entries: ['id'] }] }.
     for (const group of state.groups ?? []) {
+        const label = names.get(String(group?.id ?? '')) || group.name || group.title || '未命名分组';
         for (const id of group?.entries ?? group?.members ?? group?.items ?? []) {
-            result.set(String(id), group.name || group.title || '未命名分组');
+            result.set(String(id), label);
         }
     }
     return result;
@@ -811,8 +889,8 @@ function presetPromptGroupState(settings, preset = null) {
  * The prompt groups and their global switches.
  *
  * That switch is an overlay, exactly like the worldbook one: toggling it writes
- * `group.enabled` and leaves each prompt's own flag untouched, with the
- * effective state worked out as `item.enabled && group.enabled` at send time.
+ * `group.enabled` and leaves each prompt's own flag untouched. Nested groups
+ * inherit their parent's switch, so effective state includes every ancestor.
  * A snapshot has to record both to be able to reproduce what was in effect.
  *
  * @param {object} settings Chat completion settings
@@ -831,16 +909,17 @@ function presetPromptGroupGates(settings, preset = null) {
         members.get(groupId).push(String(identifier));
     }
 
-    return (state.groups ?? []).map((group, index) => {
+    return withGroupHierarchy((state.groups ?? []).map((group, index) => {
         const id = String(group?.id ?? index);
         const listed = (group?.entries ?? group?.members ?? group?.items ?? []).map(String);
         return {
             id,
             name: group?.name || group?.title || '未命名分组',
+            parentId: group?.parentId ? String(group.parentId) : null,
             enabled: group?.enabled !== false,
             identifiers: members.get(id) ?? listed,
         };
-    }).filter(group => group.identifiers.length);
+    }), 'identifiers');
 }
 
 function getPresetPromptGroups(settings, preset = null) {
@@ -937,7 +1016,7 @@ async function captureWorldBook(descriptor, groups = null) {
         .sort(([, a], [, b]) => Number(a?.displayIndex ?? 0) - Number(b?.displayIndex ?? 0));
     const ptGroups = getPresetTransferWorldbookEntryGroups(descriptor.name, entries.map(([uid]) => uid), data);
     const ptGates = getPresetTransferWorldbookEntryGates(descriptor.name, entries.map(([uid]) => uid), data);
-    const gatedOffUids = new Set(ptGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
+    const gatedOffUids = new Set(ptGates.filter(gate => !gate.powered).flatMap(gate => gate.subtreeUids));
     return {
         ...descriptor,
         group: bookGroups.get(descriptor.name) ?? '',
@@ -945,9 +1024,8 @@ async function captureWorldBook(descriptor, groups = null) {
         entries: entries.map(([uid, entry]) => ({
             uid: String(uid),
             label: entryLabel(entry, uid),
-            // PT's group switch is an overlay, not entry.disable. Record
-            // the effective state users see, while retaining raw state for
-            // a lossless restore of a group that is currently gated off.
+            // Group switches inherit their parent group's state. Store both
+            // the effective state and the underlying entry switch.
             enabled: !entry.disable && !gatedOffUids.has(String(uid)),
             rawEnabled: !entry.disable,
             // Always recorded, whatever the setting says. Recording changes
@@ -989,17 +1067,12 @@ function capturePreset() {
     const selectedName = manager?.getSelectedPresetName?.();
     const selectedPreset = manager?.getCompletionPresetByName?.(selectedName);
     const groups = getPresetPromptGroups(oai, selectedPreset);
-    // No preset argument on purpose: the gate to record is the one in effect
-    // right now, which lives in the provider's live state rather than in the
-    // copy saved inside the preset file.
     const promptGates = main_api === 'openai' ? presetPromptGroupGates(oai) : [];
-    const gatedOff = new Set(promptGates.filter(gate => !gate.enabled).flatMap(gate => gate.identifiers));
+    const gatedOff = new Set(promptGates.filter(gate => !gate.powered).flatMap(gate => gate.subtreeIdentifiers));
     const promptEntries = main_api === 'openai'
         ? (oai?.prompt_order ?? []).flatMap(list => (list.order ?? []).map(item => ({
             identifier: item.identifier,
             label: prompts.get(item.identifier) ?? item.identifier,
-            // The group switch is an overlay, so record the state actually in
-            // effect while keeping the raw flag for a lossless restore.
             enabled: !!item.enabled && !gatedOff.has(String(item.identifier)),
             rawEnabled: !!item.enabled,
             group: groups.get(item.identifier) ?? '',
@@ -1007,21 +1080,10 @@ function capturePreset() {
         : [];
     return {
         api: main_api,
-        // Keep the native value only as a legacy fallback. For completion
-        // presets it is commonly a mutable list index, so presetName is the
-        // authoritative reference when applying a snapshot.
         presetValue: manager?.getSelectedPreset() ?? null,
-        presetName: manager?.getSelectedPresetName() ?? '未选择预设',
-        // A snapshot is a set of switches, not a copy of a preset. The
-        // identifier remains stable when the entry is renamed or edited, so
-        // applying it later uses the preset's current text and only restores
-        // the enabled state recorded here.
+        presetName: manager?.getSelectedPresetName?.() ?? '未选择预设',
         promptEntries,
         promptGates,
-        // Chat-completion presets serve Gemini, Claude and other compatible
-        // backends. Store their generation controls separately from prompt
-        // content, so a snapshot can restore e.g. a Gemini temperature of
-        // 0.85 without overwriting the preset itself.
         parameters: capturePresetParameters(),
     };
 }
@@ -1477,9 +1539,10 @@ function regexGroupScopeKey(sourceKey, context = {}) {
  *
  * BaiBai stores `scopes[key] = {groups: [{id, name}], scripts: {id: {groupId}}}`
  * under `extension_settings.baiBaiToolkit.regexListGroups`; PT stores one flat
- * list whose groups carry a `scope` of `global` / `scoped` / `preset`. Neither
- * group has an `enabled` flag, unlike their worldbook and preset groups, so
- * this is a display grouping with no switch behind it to reproduce on apply.
+ * list whose groups carry a `scope` of `global` / `scoped` / `preset`. Regex
+ * groups do not store a separate enabled flag: their group toggle changes the
+ * disabled flag on each contained script. Snapshots preserve those per-script
+ * switches directly and leave the grouping layout alone.
  *
  * @param {string} sourceKey One of `global`, `scoped`, `preset`
  * @param {object} context The snapshot's recorded regex context
@@ -1492,7 +1555,7 @@ function regexGroupMap(sourceKey, context = {}) {
     // the copy saved into a preset is `baibaiToolkit`.
     const state = extension_settings?.baiBaiToolkit?.regexListGroups?.scopes?.[regexGroupScopeKey(sourceKey, context)];
     if (state) {
-        const names = new Map((state.groups ?? []).map(group => [String(group?.id ?? ''), group?.name || '未命名分组']));
+        const names = groupLabelMap(state.groups);
         for (const [id, meta] of Object.entries(state.scripts ?? {})) {
             const name = names.get(String(meta?.groupId ?? ''));
             if (name) result.set(String(id), name);
@@ -1502,10 +1565,12 @@ function regexGroupMap(sourceKey, context = {}) {
 
     const groupings = extension_settings?.presetTransfer?.regexScriptGroupings
         ?? extension_settings?.['preset-transfer']?.regexScriptGroupings;
+    const ptNames = groupLabelMap(groupings?.groups);
     for (const group of groupings?.groups ?? []) {
         if (group?.scope && group.scope !== sourceKey) continue;
+        const name = ptNames.get(String(group?.id ?? '')) || group?.name || '未命名分组';
         for (const id of group?.memberIds ?? group?.members ?? group?.entries ?? []) {
-            result.set(String(id), group?.name || '未命名分组');
+            result.set(String(id), name);
         }
     }
     return result;
@@ -1540,11 +1605,13 @@ function regexScriptsOf(type, owner) {
 /** The three regex source keys, paired with the script type each reads. */
 const REGEX_SCOPE_TYPES = [['global', SCRIPT_TYPES.GLOBAL], ['scoped', SCRIPT_TYPES.SCOPED], ['preset', SCRIPT_TYPES.PRESET]];
 
-function captureRegexSource(type) {
+function captureRegexSource(type, sourceKey, context) {
+    const groups = regexGroupMap(sourceKey, context);
     return {
         scripts: getScriptsByType(type).map(script => ({
             id: script.id,
             label: script.scriptName || script.id,
+            group: groups.get(String(script.id)) ?? '',
             enabled: !script.disabled,
         })),
     };
@@ -1554,28 +1621,26 @@ function captureRegex(includedSources) {
     const character = currentCharacter();
     const api = getCurrentPresetAPI();
     const presetName = getCurrentPresetName();
+    const context = {
+        characterAvatar: character?.avatar ?? null,
+        presetApi: api,
+        presetName,
+    };
     const sources = {};
-    if (includedSources?.global) sources.global = captureRegexSource(SCRIPT_TYPES.GLOBAL);
+    if (includedSources?.global) sources.global = captureRegexSource(SCRIPT_TYPES.GLOBAL, 'global', context);
     if (includedSources?.scoped) {
         sources.scoped = {
-            ...captureRegexSource(SCRIPT_TYPES.SCOPED),
+            ...captureRegexSource(SCRIPT_TYPES.SCOPED, 'scoped', context),
             allowed: isScopedScriptsAllowed(character),
         };
     }
     if (includedSources?.preset) {
         sources.preset = {
-            ...captureRegexSource(SCRIPT_TYPES.PRESET),
+            ...captureRegexSource(SCRIPT_TYPES.PRESET, 'preset', context),
             allowed: isPresetScriptsAllowed(api, presetName),
         };
     }
-    return {
-        context: {
-            characterAvatar: character?.avatar ?? null,
-            presetApi: api,
-            presetName,
-        },
-        sources,
-    };
+    return { context, sources };
 }
 
 async function applyRegexSource(type, source) {
@@ -1814,62 +1879,48 @@ async function applyWorldInfo(state, { excludedSources = new Set() } = {}) {
             .map(([uid]) => String(uid));
         const savedGates = Array.isArray(book.ptGates) ? book.ptGates : [];
         const currentGates = getPresetTransferWorldbookEntryGates(book.name, orderedUids, data);
-        const protectedUids = new Set(currentGates.filter(gate => !gate.enabled).flatMap(gate => gate.uids));
-        // What the snapshot says should actually be in effect. A group gate is
-        // derived from this rather than restored from the recorded gate state:
-        // the snapshot stores the effective switches, so a group holding
-        // anything that must be on has to be gated on for that to be reachable.
-        const wantedUids = new Set((book.entries ?? []).filter(entry => entry.enabled).map(entry => String(entry.uid)));
+        // Restore each group's own switch independently. Older snapshots may
+        // not have parent links, so use the current hierarchy only to order
+        // the saved switches; never infer a missing switch value.
+        const currentById = new Map(currentGates.map(gate => [gate.id, gate]));
+        const savedById = new Map(savedGates.map(gate => {
+            const current = currentById.get(String(gate.id));
+            return [String(gate.id), {
+                ...gate,
+                id: String(gate.id),
+                parentId: gate.parentId ?? current?.parentId ?? null,
+                uids: (gate.uids ?? []).map(String),
+            }];
+        }));
+        const restoreGates = withGroupHierarchy([...savedById.values()], 'uids').sort((a, b) => a.depth - b.depth);
 
         // Stock preset-transfer groups worldbook entries but has no group
-        // switch, so every gate reads as open and there is nothing to
-        // reproduce. Engaging this path there would warn about a feature that
-        // build does not have and skip every grouped entry, which is most of
-        // them. Only a build that actually has the switch -- or a library that
-        // already has one closed -- gets the gate treatment.
+        // switch, so there is no overlay state to restore. Only builds that
+        // expose the group-gate setter can restore these recorded switches.
         const ptSetGate = window.PT_setWorldbookGroupGate;
         const hasGateControl = typeof ptSetGate === 'function';
-        const hasClosedGate = savedGates.some(gate => !gate.enabled) || currentGates.some(gate => !gate.enabled);
-
-        if (savedGates.length && (hasGateControl || hasClosedGate)) {
-            if (hasGateControl) {
-                for (const gate of savedGates) {
-                    const members = gate.uids.filter(uid => orderedUids.includes(String(uid))).map(String);
-                    if (!members.length) continue;
-                    const wanted = members.some(uid => wantedUids.has(uid));
-                    const ok = await ptSetGate(book.name, gate.id, !wanted, members, orderedUids);
-                    // A group the snapshot leaves entirely off is gated off and
-                    // then left alone: the snapshot only says it should not be
-                    // in effect, which the closed gate already achieves, and
-                    // rewriting the switches underneath would throw away a
-                    // grouping the user set up for their own reasons.
-                    if (ok && wanted) members.forEach(uid => protectedUids.delete(uid));
-                    else members.forEach(uid => protectedUids.add(uid));
-                }
-                // PT's own setter persists grouping metadata. Reload the file
-                // before touching individual entry switches so we never write
-                // a stale, grouping-less object back over it.
-                data = await loadWorldInfo(book.name);
+        if (savedGates.length && hasGateControl) {
+            for (const gate of restoreGates) {
+                if (typeof gate.enabled !== 'boolean' || !currentById.has(gate.id)) continue;
+                await ptSetGate(book.name, gate.id, !gate.enabled);
             }
-            // Deliberately silent, and deliberately does nothing else. The
-            // snapshot recorded a closed gate but there is no setter to move
-            // one; entry switches are still restored as normal, and the only
-            // groups left alone are those closed in the user's own library
-            // right now, which `protectedUids` already covers. Warning here
-            // would name a group switch to someone whose build of
-            // preset-transfer has none, reading as a fault in this extension
-            // rather than as the no-op it is.
-            else console.debug('[One-click Snapshot] no worldbook group gate setter; gates left as they are', book.name);
+            // PT's setter persists grouping metadata. Reload before editing
+            // entry switches so stale data cannot overwrite that metadata.
+            data = await loadWorldInfo(book.name);
+        } else if (savedGates.length && !hasGateControl) {
+            // Some builds do not expose group switches. Keep their grouping
+            // untouched while still restoring each entry's own switch below.
+            console.debug('[One-click Snapshot] no worldbook group gate setter; gates left as they are', book.name);
         }
         if (!data?.entries) continue;
         let changed = false;
         for (const saved of book.entries ?? []) {
             const entry = data.entries[saved.uid];
-            if (!entry || protectedUids.has(String(saved.uid))) continue;
-            // A closed PT gate already controls effective enablement. Restore
-            // the underlying per-entry state without turning that group into
-            // a pile of permanently disabled entries.
-            const desiredEnabled = saved.enabled;
+            if (!entry) continue;
+            // `rawEnabled` is the entry's own switch; `enabled` is the
+            // inherited/effective state. Fall back for older snapshots.
+            const desiredEnabled = saved.rawEnabled ?? saved.enabled;
+            if (typeof desiredEnabled !== 'boolean') continue;
             if (!!entry.disable === !!desiredEnabled) {
                 entry.disable = !desiredEnabled;
                 changed = true;
@@ -1905,7 +1956,7 @@ function snapshotPresetValue(manager, state) {
 async function applyPreset(state) {
     if (!state || state.api !== main_api) return;
     const manager = getPresetManager();
-    const selectedValue = manager?.getSelectedPreset?.();
+    const selectedValue = manager?.getSelectedPreset();
     const targetPreset = snapshotPresetValue(manager, state);
     if (manager && !targetPreset.found) {
         const label = String(state.presetName ?? '').trim();
@@ -1917,76 +1968,63 @@ async function applyPreset(state) {
         && selectedValue !== undefined
         && String(selectedValue) === String(targetPreset.value);
     if (manager && targetPreset.found && !samePreset) {
-        // Selecting a preset starts an asynchronous native load. Waiting for
-        // it is essential: otherwise that load writes the preset file's old
-        // prompt_order over the snapshot state we just restored.
         const presetLoaded = main_api === 'openai'
             ? new Promise(resolve => eventSource.once(event_types.OAI_PRESET_CHANGED_AFTER, resolve))
             : null;
         manager.selectPreset(targetPreset.value);
         if (presetLoaded) await presetLoaded;
     }
-    // Do this after selecting the preset: native selection loads its current
-    // file values first, then the snapshot restores its saved switch state.
-    // When everything already matches, applyPresetParameters performs no UI
-    // writes and therefore cannot cause an unnecessary preset reload.
     applyPresetParameters(state.parameters);
     const savedPromptEntries = Array.isArray(state.promptEntries)
         ? state.promptEntries
-        // Older snapshots recorded the complete order. Reinterpret that
-        // record as switch state instead of restoring its old content/order.
         : Array.isArray(state.promptOrder)
             ? state.promptOrder.flatMap(list => (list?.order ?? []).map(item => ({ identifier: item.identifier, enabled: !!item.enabled })))
             : null;
     if (main_api === 'openai' && savedPromptEntries) {
         const context = SillyTavern.getContext();
-        // This runs after a changed preset has completed its native load, so
-        // renamed or edited entries retain their current content. Reloading
-        // the same preset is still avoided above.
-        const enabledByIdentifier = new Map(savedPromptEntries.map(entry => [entry.identifier, !!entry.enabled]));
-
-        // Group switches are derived rather than restored, for the same reason
-        // as the worldbook ones: the snapshot records what was in effect, so a
-        // group holding anything that must be on has to be switched on for that
-        // to be reachable. A group the snapshot leaves entirely off is switched
-        // off and its own entries are left exactly as the user arranged them --
-        // the closed switch already achieves what the snapshot asked for.
-        const skipped = new Set();
+        const enabledByIdentifier = new Map(savedPromptEntries.map(entry => [
+            String(entry.identifier), entry.rawEnabled ?? !!entry.enabled,
+        ]));
         let gateChanged = false;
         const liveGroupState = presetPromptGroupState(context.chatCompletionSettings);
-        // Only when the provider's groups already carry the switch. A build
-        // that merely groups prompts has no such concept, and writing the flag
-        // in would put a field it never asked for into its own settings.
         const hasGroupSwitch = (liveGroupState?.groups ?? []).some(group => typeof group?.enabled === 'boolean');
         if (liveGroupState && hasGroupSwitch && Array.isArray(state.promptGates)) {
-            // The stored copy is written too, so the choice survives the next
-            // time the provider reloads its runtime state from disk.
-            const storedGroups = context.chatCompletionSettings?.extensions?.baibaiToolkit?.presetPromptGroups?.groups;
-            for (const gate of presetPromptGroupGates(context.chatCompletionSettings)) {
-                const wanted = gate.identifiers.some(identifier => enabledByIdentifier.get(identifier) === true);
-                for (const groups of [liveGroupState.groups, storedGroups]) {
+            const liveGates = presetPromptGroupGates(context.chatCompletionSettings);
+            const liveById = new Map(liveGates.map(gate => [gate.id, gate]));
+            const restoreGates = state.promptGates
+                .filter(gate => typeof gate.enabled === 'boolean')
+                .map(gate => {
+                    const id = String(gate.id);
+                    return { ...gate, id, parentId: gate.parentId ?? liveById.get(id)?.parentId ?? null };
+                })
+                .sort((a, b) => (liveById.get(a.id)?.depth ?? 0) - (liveById.get(b.id)?.depth ?? 0));
+            const storedGroupsList = [
+                context.chatCompletionSettings?.extensions?.baibaiToolkit?.presetPromptGroups?.groups,
+                context.chatCompletionSettings?.extensions?.presetTransfer?.presetPromptGroups?.groups,
+                context.chatCompletionSettings?.extensions?.['preset-transfer']?.presetPromptGroups?.groups,
+            ].filter((groups, index, all) => Array.isArray(groups) && all.indexOf(groups) === index);
+            for (const gate of restoreGates) {
+                if (!liveById.has(gate.id)) continue;
+                for (const groups of [liveGroupState.groups, ...storedGroupsList]) {
                     const group = (groups ?? []).find(item => String(item?.id ?? '') === gate.id);
-                    if (!group || group.enabled === wanted) continue;
-                    group.enabled = wanted;
+                    if (!group || group.enabled === gate.enabled) continue;
+                    group.enabled = gate.enabled;
                     gateChanged = true;
                 }
-                if (!wanted) gate.identifiers.forEach(identifier => skipped.add(identifier));
             }
         }
-
         let changed = false;
         for (const list of context.chatCompletionSettings.prompt_order ?? []) {
             for (const item of list.order ?? []) {
-                if (!enabledByIdentifier.has(item.identifier) || skipped.has(String(item.identifier))) continue;
-                const enabled = enabledByIdentifier.get(item.identifier);
+                const identifier = String(item.identifier);
+                if (!enabledByIdentifier.has(identifier)) continue;
+                const enabled = enabledByIdentifier.get(identifier);
                 if (!!item.enabled !== enabled) {
                     item.enabled = enabled;
                     changed = true;
                 }
             }
         }
-        // The gate alone counts as a change: the prompt manager has to redraw
-        // for a group that just closed to stop showing as active.
         if (changed || gateChanged) {
             saveSettingsDebounced();
             await eventSource.emit(event_types.OAI_PRESET_CHANGED_AFTER);
@@ -2703,7 +2741,10 @@ async function applySnapshot(snapshot, { silent = false, skipMismatchPrompt = fa
         snapshot.appliedAt = Date.now();
         saveSettingsDebounced();
         saveMetadataDebounced();
-        if (!silent) toastr.success(`${incompatible.length ? '已应用兼容内容' : '已应用'}：${snapshot.name}`, '一键快照');
+        if (!silent) {
+            const appliedLabel = `${incompatible.length ? '已应用兼容内容' : '已应用'}：${snapshot.name}`;
+            toastr.success(appliedLabel, '一键快照');
+        }
         return true;
     } catch (error) {
         console.error('[One-click Snapshot]', error);
@@ -4986,6 +5027,14 @@ const SNAPSHOT_SCOPE_TAGS = [
     ['regex', '正则'],
 ];
 
+function removeSnapshotScope(snapshot, key) {
+    snapshot.scopes ??= {};
+    snapshot.payload ??= {};
+    snapshot.payload[key] = null;
+    snapshot.scopes[key] = false;
+    snapshot.updatedAt = Date.now();
+}
+
 const SNAPSHOT_SCOPE_SOURCE_OPTIONS = {
     worldInfo: {
         title: '世界书记录范围',
@@ -5406,13 +5455,10 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
     const showStrategy = feature('snapshot.worldEntryStrategy');
 
     const entrySwitch = (entry, afterChange) => {
-        const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
+        const input = $('<input type="checkbox">').prop('checked', entry.rawEnabled ?? (entry.enabled !== false));
         input.on('change', function () {
-            // A hand-picked state is the one to restore, so the raw value moves
-            // with it. Leaving it behind would make a group that is gated off
-            // today restore the old switch instead of this one.
-            entry.enabled = this.checked;
             entry.rawEnabled = this.checked;
+            entry.enabled = this.checked && snapshotGroupEnabledForMember(book.ptGates, 'uids', entry.uid);
             afterChange();
         });
         const toggle = $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
@@ -5446,7 +5492,7 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
      * One toggle for a whole set, reading as on only when every entry is.
      * Clicking it turns the set fully on, or fully off when it already is.
      */
-    const bulkToggle = (entries, afterChange) => {
+    const bulkToggle = (book, entries, afterChange) => {
         const icon = $('<i class="ocs-toggle-icon"></i>');
         const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
         // Re-read on demand rather than captured: single entries are toggled
@@ -5456,8 +5502,8 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         // therefore means "turn the rest on" or, when already fully on, "turn
         // it all off".
         const sync = () => {
-            const any = entries.some(entry => entry.enabled !== false);
-            const all = entries.length > 0 && entries.every(entry => entry.enabled !== false);
+            const any = entries.some(entry => (entry.rawEnabled ?? entry.enabled) !== false);
+            const all = entries.length > 0 && entries.every(entry => (entry.rawEnabled ?? entry.enabled) !== false);
             icon.toggleClass('is-on', any);
             button.attr('title', all ? '全部关闭' : '全部开启');
             return all;
@@ -5471,8 +5517,8 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
             event.stopPropagation();
             const value = !sync();
             for (const entry of entries) {
-                entry.enabled = value;
                 entry.rawEnabled = value;
+                entry.enabled = value && snapshotGroupEnabledForMember(book.ptGates, 'uids', entry.uid);
             }
             afterChange(true);
         });
@@ -5518,7 +5564,7 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
                 const counter = $('<small></small>');
                 counters.push([counter, members]);
                 const drawer = $('<details class="ocs-world-entry-group"></details>');
-                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulkToggle(members, redraw)));
+                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulkToggle(book, members, redraw)));
                 const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
                 for (const entry of members) groupBody.append(entrySwitch(entry, onToggle));
                 panel.append(drawer.append(groupBody));
@@ -5739,9 +5785,7 @@ function scopeBadges(snapshot, onChange = () => {}) {
                 .append('<i class="fa-solid fa-xmark"></i>')
                 .on('click', async () => {
                     if (!await Popup.show.confirm('移除记录范围', `这个快照将不再记录${label}，已经记下的内容会丢失。`)) return;
-                    snapshot.payload[key] = null;
-                    snapshot.scopes[key] = false;
-                    snapshot.updatedAt = Date.now();
+                    removeSnapshotScope(snapshot, key);
                     saveSettingsDebounced();
                     onChange();
                     render();
@@ -5885,9 +5929,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 event.preventDefault();
                 event.stopPropagation();
                 if (!await Popup.show.confirm('移除记录范围', `这个快照将不再记录${label}，已经记下的内容会丢失。`)) return;
-                payload[scope] = null;
-                snapshot.scopes[scope] = false;
-                snapshot.updatedAt = Date.now();
+                removeSnapshotScope(snapshot, scope);
                 saveSettingsDebounced();
                 renderSections();
             });
@@ -6309,15 +6351,16 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
     }
     {
         const buildPresetView = () => {
-            const presetLabel = payload.preset?.presetName ?? '未选择预设';
+            const presetName = payload.preset?.presetName || '未选择预设';
+            const presetLabel = `预设：${presetName}`;
             const manager = getPresetManager();
-            const selectedPreset = manager?.getCompletionPresetByName?.(payload.preset?.presetName);
+            const selectedPreset = manager?.getCompletionPresetByName?.(presetName);
             const livePromptGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
             const usePresetGroups = Boolean(presetGroupingProvider());
             const nodes = [];
             const groups = new Map();
             const enabledEntries = (payload.preset?.promptEntries ?? []).filter(entry => entry.enabled);
-            const presetDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设启用', presetLabel);
+            const presetDrawer = makeDrawer('ocs-content-section ocs-content-preset', '预设内容', presetLabel);
             const presetBody = drawerBody(presetDrawer);
             const parameterLines = presetParameterLines(payload.preset?.parameters);
             const parameterDrawer = makeDrawer('ocs-content-preset-section', '预设参数', parameterLines.length ? `${parameterLines.length} 项` : '');
@@ -6355,38 +6398,44 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         };
 
         /** Which preset the snapshot points at, its entries and its parameters. */
-        const buildPresetEditor = () => {
+        const buildPresetEditor = (isEditing) => {
             const state = payload.preset ??= { api: main_api, presetName: '', promptEntries: [], parameters: null };
             const manager = getPresetManager();
             const selectedPreset = manager?.getCompletionPresetByName?.(state.presetName);
 
             const section = $('<details class="ocs-content-drawer ocs-content-section ocs-content-preset" open></details>');
             section.append(
-                $('<summary></summary>').append($('<b></b>').text('预设与条目'), $('<small></small>').text(state.presetName || '未选择预设')),
+                $('<summary></summary>').append(
+                    $('<b></b>').text('预设内容'),
+                    $('<small></small>').text(`预设：${state.presetName || '未选择'}`),
+                ),
                 $('<div class="ocs-content-drawer-body"></div>'),
             );
             const body = section.children('.ocs-content-drawer-body');
 
-            body.append(selectRow('预设', presetOptions(), state.presetName ?? '', (value) => {
+            const loadStateFromPreset = value => {
                 const preset = manager?.getCompletionPresetByName?.(value);
                 if (!preset) return toastr.warning('读不到这个预设的内容。', '一键快照');
                 const labels = new Map((preset.prompts ?? []).map(prompt => [prompt.identifier, prompt.name || prompt.identifier]));
                 const groups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, preset);
-                // Read straight off the preset object, so a snapshot can point
-                // at a preset that was never loaded.
+                state.api = main_api;
                 state.presetName = value;
                 state.presetValue = null;
+                state.promptGates = presetPromptGroupGates(SillyTavern.getContext().chatCompletionSettings, preset);
                 state.promptEntries = (preset.prompt_order ?? []).flatMap(list => (list.order ?? []).map(item => ({
                     identifier: item.identifier,
                     label: labels.get(item.identifier) ?? item.identifier,
-                    enabled: !!item.enabled,
+                    enabled: !!item.enabled && snapshotGroupEnabledForMember(state.promptGates, 'identifiers', item.identifier),
+                    rawEnabled: !!item.enabled,
                     group: groups.get(item.identifier) ?? '',
                 })));
                 state.parameters = presetParametersOf(preset);
                 snapshot.updatedAt = Date.now();
                 saveSettingsDebounced();
                 renderSections();
-            }));
+            };
+            body.append(selectRow('预设与条目', presetOptions(), state.presetName ?? '', loadStateFromPreset));
+            if (isEditing) attachScopeRemove(section, 'preset');
 
             /* ---------------------------------------------------- parameters -- */
             const parameters = state.parameters ?? {};
@@ -6436,9 +6485,10 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             const groupOf = entry => (useGroups ? entry.group || liveGroups.get(entry.identifier) || '' : '');
 
             const entryToggle = (entry, afterChange) => {
-                const input = $('<input type="checkbox">').prop('checked', entry.enabled !== false);
+                const input = $('<input type="checkbox">').prop('checked', entry.rawEnabled ?? (entry.enabled !== false));
                 input.on('change', function () {
-                    entry.enabled = this.checked;
+                    entry.rawEnabled = this.checked;
+                    entry.enabled = this.checked && snapshotGroupEnabledForMember(state.promptGates, 'identifiers', entry.identifier);
                     snapshot.updatedAt = Date.now();
                     saveSettingsDebounced();
                     afterChange();
@@ -6461,8 +6511,8 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 const icon = $('<i class="ocs-toggle-icon"></i>');
                 const button = $('<button type="button" class="ocs-world-bulk"></button>').append(icon);
                 const sync = () => {
-                    const any = members.some(entry => entry.enabled !== false);
-                    const all = members.length > 0 && members.every(entry => entry.enabled !== false);
+                    const any = members.some(entry => (entry.rawEnabled ?? entry.enabled) !== false);
+                    const all = members.length > 0 && members.every(entry => (entry.rawEnabled ?? entry.enabled) !== false);
                     icon.toggleClass('is-on', any);
                     button.attr('title', all ? '全部关闭' : '全部开启');
                     return all;
@@ -6473,7 +6523,10 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                     event.preventDefault();
                     event.stopPropagation();
                     const value = !sync();
-                    for (const entry of members) entry.enabled = value;
+                    for (const entry of members) {
+                        entry.rawEnabled = value;
+                        entry.enabled = value && snapshotGroupEnabledForMember(state.promptGates, 'identifiers', entry.identifier);
+                    }
                     snapshot.updatedAt = Date.now();
                     saveSettingsDebounced();
                     renderSections();
@@ -6514,8 +6567,8 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
 
         mount((isEditing) => {
             if (!snapshot.scopes?.preset) return null;
-            return isEditing ? buildPresetEditor() : buildPresetView();
-        }, 'preset');
+            return isEditing ? buildPresetEditor(isEditing) : buildPresetView();
+        });
     }
     if (snapshot.scopes?.api) {
         const state = payload.api ?? {};
@@ -6528,15 +6581,17 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
         const REGEX_SOURCE_TYPES = { global: SCRIPT_TYPES.GLOBAL, scoped: SCRIPT_TYPES.SCOPED, preset: SCRIPT_TYPES.PRESET };
 
         /** Loads an owner's rules in, keeping the switches already chosen. */
-        const loadRegexScripts = (source, type, owner) => {
+        const loadRegexScripts = (source, sourceKey, type, owner) => {
             // Recording an owner's rules at all implies they are meant to run,
             // so the permission SillyTavern keeps per character/preset is set
             // along with them rather than left at its default.
             source.allowed = true;
             const chosen = new Map((source.scripts ?? []).map(script => [script.id, !!script.enabled]));
+            const groups = regexGroupMap(sourceKey, context);
             source.scripts = regexScriptsOf(type, owner).map(script => ({
                 id: script.id,
                 label: script.scriptName || script.id,
+                group: groups.get(String(script.id)) ?? '',
                 // Default off: this page is for choosing what to record, not
                 // for taking a copy of how the owner happens to be set up.
                 enabled: chosen.get(script.id) ?? false,
@@ -6553,7 +6608,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 return selectRow('角色', owners, context.characterAvatar ?? '', (value) => {
                     context.characterAvatar = value;
                     context.characterName = owners.find(owner => owner.value === value)?.label ?? '';
-                    loadRegexScripts(source, SCRIPT_TYPES.SCOPED, value);
+                    loadRegexScripts(source, 'scoped', SCRIPT_TYPES.SCOPED, value);
                     snapshot.updatedAt = Date.now();
                     saveSettingsDebounced();
                     renderSections();
@@ -6565,7 +6620,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             return selectRow('预设', owners, context.presetName ?? '', (value) => {
                 context.presetName = value;
                 context.presetApi = getCurrentPresetAPI();
-                loadRegexScripts(source, SCRIPT_TYPES.PRESET, value);
+                loadRegexScripts(source, 'preset', SCRIPT_TYPES.PRESET, value);
                 snapshot.updatedAt = Date.now();
                 saveSettingsDebounced();
                 renderSections();
@@ -6664,7 +6719,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                     const grouped = new Map();
                     const flat = [];
                     for (const script of enabled) {
-                        const group = groups.get(String(script.id));
+                        const group = script.group || groups.get(String(script.id));
                         if (!group) { flat.push(script.label || script.id); continue; }
                         if (!grouped.has(group)) grouped.set(group, []);
                         grouped.get(group).push(script.label || script.id);
@@ -6695,7 +6750,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 const grouped = new Map();
                 const ungrouped = [];
                 for (const script of scripts) {
-                    const group = groups.get(String(script.id));
+                    const group = script.group || groups.get(String(script.id));
                     if (!group) { ungrouped.push(script); continue; }
                     if (!grouped.has(group)) grouped.set(group, []);
                     grouped.get(group).push(script);
@@ -7498,9 +7553,19 @@ $(async () => {
     // A personal branch. Its group handling assumes an environment only one
     // install has, so anywhere else it says so rather than behaving oddly.
     eventSource.once(event_types.APP_READY, () => {
-        if (hasWorldbookEntryGroupRecords() || groupingExtensionState()) return;
-        console.error('[One-click Snapshot] icedream-only is a personal branch; switch the extension back to main.');
-        toastr.error('当前是 icedream 的个人分支（icedream-only），不对外提供支持。请在插件目录切回 main 分支。', '一键快照', { timeOut: 0, extendedTimeOut: 0 });
+        // Saved settings can remain after the transfer extension is removed,
+        // and are not proof that its runtime integration is available.
+        let attempts = 0;
+        const checkTransferIntegration = () => {
+            if (typeof window.PT_setWorldbookGroupGate === 'function') return;
+            if (++attempts < 50) {
+                setTimeout(checkTransferIntegration, 100);
+                return;
+            }
+            console.error('[One-click Snapshot] icedream-only is a personal branch; switch the extension back to main.');
+            toastr.error('当前是 icedream 的个人分支（icedream-only），不对外提供支持。请在插件目录切回 main 分支。', '一键快照', { timeOut: 0, extendedTimeOut: 0 });
+        };
+        checkTransferIntegration();
     });
     installPersonaManager(settings);
     installPersonaTitleLock();
