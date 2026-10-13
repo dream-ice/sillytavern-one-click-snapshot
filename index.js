@@ -42,6 +42,8 @@ let versionAutoSyncTimer = null;
 let qrShortcutObserver = null;
 let qrShortcutRefreshQueued = false;
 let greetingSnapshotPending = null;
+let lastChatChangeId = null;
+let lastChatBindingApplication = null;
 let greetingGenerationStopped = false;
 let greetingDeferredCharacterDefaultChatId = null;
 let themeOptionObserver = null;
@@ -7479,6 +7481,10 @@ async function onChatChanged() {
     // can apply a different character version.
     cacheOpeningGreetingMap();
     const chatId = String(getCurrentChatId() ?? '');
+    if (chatId !== lastChatChangeId) {
+        lastChatChangeId = chatId;
+        lastChatBindingApplication = null;
+    }
     if (greetingSnapshotPending?.chatId !== chatId) greetingSnapshotPending = null;
     // A chat-specific binding always wins. A disabled specific binding is an
     // explicit opt-out and therefore does not fall back to the character one.
@@ -7492,14 +7498,21 @@ async function onChatChanged() {
             saveMetadataDebounced();
             return;
         }
+        const applicationKey = `${chatId}\u0000${snapshot.id}`;
+        if (lastChatBindingApplication === applicationKey) return;
         if (value.compatibleOnly) {
             if (!snapshotCanBindToCurrentCharacter(snapshot, { notify: true })) return;
         } else if (!snapshotCanBindCurrentChat(snapshot, { notify: true })) return;
+        lastChatBindingApplication = applicationKey;
         // Populate the human-readable binding list for bindings created
         // before this version as soon as their chat is visited.
         rememberCurrentChatBinding(snapshot.id);
         saveSettingsDebounced();
-        await applySnapshot(snapshot, { skipMismatchPrompt: true, persistCharacter: false, preserveGreetingCatalog: true, allowThemeOverride: true });
+        const applied = await applySnapshot(snapshot, { skipMismatchPrompt: true, persistCharacter: false, preserveGreetingCatalog: true, allowThemeOverride: true });
+        if (!applied) {
+            if (lastChatBindingApplication === applicationKey) lastChatBindingApplication = null;
+            return;
+        }
         // Theme Manager applies its character binding shortly after a role is
         // selected. A chat binding is more specific, so re-assert its theme
         // after that deferred role-level application has finished.
