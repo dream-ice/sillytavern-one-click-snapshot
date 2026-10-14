@@ -231,6 +231,8 @@
    switch rather than as a pair of commands. */
 .ocs-world-bulk { display: inline-flex; flex: 0 0 auto; align-items: center; padding: 2px 4px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; line-height: 1; }
 .ocs-world-bulk:hover { background: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 18%, transparent); }
+.ocs-world-gate-toggle { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 28%, transparent); border-radius: 999px; }
+.ocs-world-gate-toggle:hover { border-color: color-mix(in srgb, var(--SmartThemeQuoteColor, #9cc) 62%, transparent); }
 /* Hidden in the book header until its entries are on screen; the copies inside
    the entry list always show, so this is scoped to the header. */
 .ocs-world-book-head > .ocs-world-bulk { display: none; }

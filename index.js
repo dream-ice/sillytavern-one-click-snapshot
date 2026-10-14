@@ -600,11 +600,14 @@ function hasWorldbookEntryGroupRecords() {
 /** Add each group's inherited switch state and the members beneath it. */
 function withGroupHierarchy(gates, memberKey) {
     const byId = new Map(gates.map(gate => [String(gate.id), gate]));
+    const hasParent = gate => gate?.parentId !== null
+        && gate?.parentId !== undefined
+        && String(gate.parentId) !== '';
     const parentOf = gate => byId.get(String(gate?.parentId ?? '')) ?? null;
     const isDescendantOf = (gate, ancestorId) => {
         const visited = new Set();
         let current = gate;
-        while (current?.parentId && !visited.has(String(current.id))) {
+        while (hasParent(current) && !visited.has(String(current.id))) {
             const parentId = String(current.parentId);
             if (parentId === String(ancestorId)) return true;
             visited.add(String(current.id));
@@ -619,7 +622,7 @@ function withGroupHierarchy(gates, memberKey) {
         return !parent || powered(parent, visited);
     };
     const depth = (gate, visited = new Set()) => {
-        if (!gate?.parentId || visited.has(String(gate.id))) return 0;
+        if (!hasParent(gate) || visited.has(String(gate.id))) return 0;
         visited.add(String(gate.id));
         const parent = parentOf(gate);
         return parent ? depth(parent, visited) + 1 : 0;
@@ -641,6 +644,9 @@ function withGroupHierarchy(gates, memberKey) {
 function groupLabelMap(groups) {
     const byId = new Map((groups ?? []).map(group => [String(group?.id ?? ''), group]));
     const labels = new Map();
+    const hasParent = group => group?.parentId !== null
+        && group?.parentId !== undefined
+        && String(group.parentId) !== '';
     const labelFor = (id, visited = new Set()) => {
         const key = String(id ?? '');
         if (!key || visited.has(key)) return '';
@@ -649,7 +655,7 @@ function groupLabelMap(groups) {
         if (!group) return '';
         visited.add(key);
         const name = String(group.name || group.title || '未命名分组');
-        const parent = group.parentId ? labelFor(group.parentId, visited) : '';
+        const parent = hasParent(group) ? labelFor(group.parentId, visited) : '';
         const label = parent ? `${parent} › ${name}` : name;
         labels.set(key, label);
         return label;
@@ -667,9 +673,56 @@ function snapshotGroupEnabledForMember(gates, memberKey, memberId) {
         const gateId = String(gate.id);
         visited.add(gateId);
         if (gate.enabled === false) return false;
-        gate = gate.parentId ? byId.get(String(gate.parentId)) : null;
+        const hasParent = gate.parentId !== null && gate.parentId !== undefined && String(gate.parentId) !== '';
+        gate = hasParent ? byId.get(String(gate.parentId)) : null;
     }
     return true;
+}
+
+/** Builds the saved group hierarchy for the snapshot content editor. */
+function snapshotGateTree(gates) {
+    const nodes = new Map((gates ?? []).map(gate => [String(gate.id), { gate, children: [] }]));
+    const roots = [];
+    const parentOf = new Map();
+    for (const [id, node] of nodes) {
+        const parentId = node.gate.parentId;
+        const parent = parentId === null || parentId === undefined || String(parentId) === ''
+            ? null
+            : nodes.get(String(parentId));
+        if (!parent || parent === node) {
+            roots.push(node);
+            continue;
+        }
+        parentOf.set(id, parent);
+    }
+
+    // Ignore malformed cyclic links rather than letting a damaged grouping
+    // make the editor recurse forever. The affected group becomes a root.
+    for (const [id, parent] of parentOf) {
+        let current = parent;
+        const seen = new Set([id]);
+        let cyclic = false;
+        while (current) {
+            const currentId = String(current.gate.id);
+            if (seen.has(currentId)) { cyclic = true; break; }
+            seen.add(currentId);
+            current = parentOf.get(currentId);
+        }
+        if (cyclic) {
+            parentOf.delete(id);
+            roots.push(nodes.get(id));
+        }
+    }
+    for (const [id, parent] of parentOf) parent.children.push(nodes.get(id));
+    return { roots, nodes };
+}
+
+/** Recomputes each saved item's effective state without changing its own switch. */
+function syncSnapshotGroupMemberStates(gates, items, memberKey, idKey) {
+    for (const item of items ?? []) {
+        const ownState = item.rawEnabled ?? item.enabled;
+        item.enabled = ownState !== false && snapshotGroupEnabledForMember(gates, memberKey, item[idKey]);
+    }
 }
 
 function getPresetTransferWorldbookEntryGroups(worldbookName, orderedUids, data = null) {
@@ -720,7 +773,9 @@ function getPresetTransferWorldbookEntryGates(worldbookName, orderedUids, data =
                 return {
                     id,
                     name: String(group?.name ?? '').trim() || '未命名分组',
-                    parentId: group?.parentId ? String(group.parentId) : null,
+                    parentId: group?.parentId !== null && group?.parentId !== undefined && String(group.parentId) !== ''
+                        ? String(group.parentId)
+                        : null,
                     uids: uids.filter(uid => String(record.entries[uid]?.groupId ?? '') === id),
                     enabled: group?.enabled !== false,
                 };
@@ -917,7 +972,9 @@ function presetPromptGroupGates(settings, preset = null) {
         return {
             id,
             name: group?.name || group?.title || '未命名分组',
-            parentId: group?.parentId ? String(group.parentId) : null,
+            parentId: group?.parentId !== null && group?.parentId !== undefined && String(group.parentId) !== ''
+                ? String(group.parentId)
+                : null,
             enabled: group?.enabled !== false,
             identifiers: members.get(id) ?? listed,
         };
@@ -5460,7 +5517,6 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         const input = $('<input type="checkbox">').prop('checked', entry.rawEnabled ?? (entry.enabled !== false));
         input.on('change', function () {
             entry.rawEnabled = this.checked;
-            entry.enabled = this.checked && snapshotGroupEnabledForMember(book.ptGates, 'uids', entry.uid);
             afterChange();
         });
         const toggle = $('<label class="ocs-world-entry"></label>').append(input, '<i class="ocs-toggle-icon"></i>', $('<span></span>').text(entry.label || entry.uid));
@@ -5537,40 +5593,118 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         // grouped after this snapshot was taken.
         const livePtGroups = getPresetTransferWorldbookEntryGroups(book.name, entries.map(entry => entry.uid));
         const groupOf = entry => entry.ptGroup || livePtGroups.get(String(entry.uid)) || entry.group || '';
+        const gates = book.ptGates ?? [];
+        const tree = snapshotGateTree(gates);
+        const assigned = new Map();
+        for (const [id, node] of tree.nodes) {
+            for (const uid of node.gate.uids ?? []) if (!assigned.has(String(uid))) assigned.set(String(uid), id);
+            node.entries = [];
+        }
+        const leftovers = [];
+        for (const entry of entries) {
+            const id = assigned.get(String(entry.uid));
+            if (id && tree.nodes.has(id)) tree.nodes.get(id).entries.push(entry);
+            else leftovers.push(entry);
+        }
+        const entryOrder = new Map(entries.map((entry, index) => [entry, index]));
 
-        // Rebuilt on a bulk change, because every switch in it may have moved.
+        // Rebuilt on a switch change so inherited states and every ancestor's
+        // effective count stay in sync.
         const draw = () => {
             panel.empty();
-
-            const grouped = new Map();
-            const ungrouped = [];
-            for (const entry of entries) {
-                const group = groupOf(entry);
-                if (!group) { ungrouped.push(entry); continue; }
-                if (!grouped.has(group)) grouped.set(group, []);
-                grouped.get(group).push(entry);
-            }
-
-            // Counters are refreshed in place on a single toggle, because
-            // rebuilding would collapse the group being worked through.
-            const counters = [];
             const refreshCounts = () => {
                 showCount();
-                for (const [node, members] of counters) node.text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
-                panel.find('.ocs-world-bulk').trigger('ocs:sync');
+                panel.find('.ocs-world-gate-toggle').each((_, button) => {
+                    const gate = gates.find(item => String(item.id) === String($(button).attr('data-gate-id')));
+                    const enabled = gate?.enabled !== false;
+                    $(button).children('.ocs-toggle-icon').toggleClass('is-on', enabled)
+                        .attr('title', enabled ? '关闭此分组' : '开启此分组');
+                    $(button).attr('aria-pressed', String(enabled));
+                });
+                for (const node of panel.find('.ocs-world-entry-group').toArray()) {
+                    const gateId = $(node).attr('data-gate-id');
+                    if (gateId == null) continue;
+                    const gateNode = tree.nodes.get(String(gateId));
+                    if (!gateNode) continue;
+                    const members = descendants(gateNode);
+                    $(node).children('summary').children('small').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
+                }
             };
-            const onToggle = () => { refreshCounts(); commit(); };
-
-            for (const entry of ungrouped) panel.append(entrySwitch(entry, onToggle));
-            for (const [group, members] of grouped) {
-                const counter = $('<small></small>');
-                counters.push([counter, members]);
+            const onToggle = () => {
+                syncSnapshotGroupMemberStates(gates, entries, 'uids', 'uid');
+                refreshCounts();
+                commit();
+            };
+            const topLevel = [];
+            const drawFallbackGroups = () => {
+                const grouped = new Map();
+                for (const entry of leftovers) {
+                    const group = groupOf(entry);
+                    if (!group) {
+                        topLevel.push({ order: entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER, node: entrySwitch(entry, onToggle) });
+                        continue;
+                    }
+                    if (!grouped.has(group)) grouped.set(group, []);
+                    grouped.get(group).push(entry);
+                }
+                for (const [group, members] of grouped) {
+                    const drawer = $('<details class="ocs-world-entry-group"></details>');
+                    drawer.append($('<summary></summary>').append($('<b></b>').text(group), $('<small></small>').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`)));
+                    const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
+                    for (const entry of members) groupBody.append(entrySwitch(entry, onToggle));
+                    topLevel.push({
+                        order: Math.min(...members.map(entry => entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER)),
+                        node: drawer.append(groupBody),
+                    });
+                }
+            };
+            const descendants = (node, seen = new Set()) => {
+                if (seen.has(node)) return [];
+                seen.add(node);
+                return [...node.entries, ...node.children.flatMap(child => descendants(child, seen))];
+            };
+            const firstOrder = node => Math.min(...descendants(node).map(entry => entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER));
+            const renderGate = (node, seen = new Set()) => {
+                if (seen.has(node)) return null;
+                const nextSeen = new Set(seen).add(node);
+                const gate = node.gate;
+                const members = descendants(node);
                 const drawer = $('<details class="ocs-world-entry-group"></details>');
-                drawer.append($('<summary></summary>').append($('<b></b>').text(group), counter, bulkToggle(book, members, redraw)));
+                drawer.attr('data-gate-id', String(gate.id));
+                const summary = $('<summary></summary>').append(
+                    $('<b></b>').text(gate.name || '未命名分组'),
+                    $('<small></small>').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`),
+                );
+                const gateEnabled = gate.enabled !== false;
+                const gateButton = $('<button type="button" class="ocs-world-bulk ocs-world-gate-toggle"></button>')
+                    .attr({ 'data-gate-id': String(gate.id), title: gateEnabled ? '关闭此分组' : '开启此分组', 'aria-label': `${gateEnabled ? '关闭' : '开启'}分组：${gate.name || '未命名分组'}`, 'aria-pressed': String(gateEnabled) })
+                    .append($('<i class="ocs-toggle-icon"></i>').toggleClass('is-on', gateEnabled));
+                gateButton.on('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    gate.enabled = gate.enabled === false;
+                    syncSnapshotGroupMemberStates(gates, entries, 'uids', 'uid');
+                    refreshCounts();
+                    commit();
+                });
+                summary.append(gateButton);
+                drawer.append(summary);
                 const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
-                for (const entry of members) groupBody.append(entrySwitch(entry, onToggle));
-                panel.append(drawer.append(groupBody));
+                const childNodes = node.entries.map(entry => ({ order: entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER, node: entrySwitch(entry, onToggle) }));
+                for (const child of node.children) {
+                    const childNode = renderGate(child, nextSeen);
+                    if (childNode) childNodes.push({ order: firstOrder(child), node: childNode });
+                }
+                childNodes.sort((a, b) => a.order - b.order).forEach(item => groupBody.append(item.node));
+                return drawer.append(groupBody);
             }
+            syncSnapshotGroupMemberStates(gates, entries, 'uids', 'uid');
+            for (const node of tree.roots) {
+                const group = renderGate(node);
+                if (group) topLevel.push({ order: firstOrder(node), node: group });
+            }
+            drawFallbackGroups();
+            topLevel.sort((a, b) => a.order - b.order).forEach(item => panel.append(item.node));
             refreshCounts();
         };
         const redraw = () => {
@@ -5612,7 +5746,7 @@ function renderWorldEditor(snapshot, rerender, chatWorlds = []) {
         showCount();
 
         const entries = renderEntries(book, showCount);
-        bulk = bulkToggle(book.entries ?? [], () => entries.trigger('ocs:redraw'));
+        bulk = bulkToggle(book, book.entries ?? [], () => entries.trigger('ocs:redraw'));
         const expand = $('<button type="button" class="ocs-button ocs-icon-button"><i class="fa-solid fa-angles-down"></i></button>')
             .attr('title', '展开条目')
             .on('click', () => {
@@ -6482,6 +6616,22 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
 
             /* ------------------------------------------------------- entries -- */
             const entries = state.promptEntries ?? [];
+            const gates = state.promptGates ?? [];
+            const tree = snapshotGateTree(gates);
+            const assigned = new Map();
+            for (const [id, node] of tree.nodes) {
+                for (const identifier of node.gate.identifiers ?? []) {
+                    if (!assigned.has(String(identifier))) assigned.set(String(identifier), id);
+                }
+                node.entries = [];
+            }
+            const leftovers = [];
+            for (const entry of entries) {
+                const id = assigned.get(String(entry.identifier));
+                if (id && tree.nodes.has(id)) tree.nodes.get(id).entries.push(entry);
+                else leftovers.push(entry);
+            }
+            syncSnapshotGroupMemberStates(gates, entries, 'identifiers', 'identifier');
             const liveGroups = getPresetPromptGroups(SillyTavern.getContext().chatCompletionSettings, selectedPreset);
             const useGroups = Boolean(presetGroupingProvider());
             const groupOf = entry => (useGroups ? entry.group || liveGroups.get(entry.identifier) || '' : '');
@@ -6490,7 +6640,7 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 const input = $('<input type="checkbox">').prop('checked', entry.rawEnabled ?? (entry.enabled !== false));
                 input.on('change', function () {
                     entry.rawEnabled = this.checked;
-                    entry.enabled = this.checked && snapshotGroupEnabledForMember(state.promptGates, 'identifiers', entry.identifier);
+                    syncSnapshotGroupMemberStates(gates, entries, 'identifiers', 'identifier');
                     snapshot.updatedAt = Date.now();
                     saveSettingsDebounced();
                     afterChange();
@@ -6503,11 +6653,28 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
             const list = $('<div class="ocs-world-entries is-open"></div>');
             if (!entries.length) list.append($('<small></small>').text('这个预设没有可记录的条目。'));
 
-            const counters = [];
+            const descendants = (node, seen = new Set()) => {
+                if (seen.has(node)) return [];
+                seen.add(node);
+                return [...node.entries, ...node.children.flatMap(child => descendants(child, seen))];
+            };
+            const entryOrder = new Map(entries.map((entry, index) => [entry, index]));
+            const firstOrder = node => Math.min(...descendants(node).map(entry => entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER));
             const refresh = () => {
-                for (const [node, members] of counters) node.text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
                 list.find('.ocs-world-bulk').trigger('ocs:sync');
                 entriesDrawer.children('summary').children('small').text(`已开启 ${entries.filter(entry => entry.enabled !== false).length} / ${entries.length} 条`);
+                list.find('.ocs-world-gate-toggle').each((_, button) => {
+                    const gate = gates.find(item => String(item.id) === String($(button).attr('data-gate-id')));
+                    const enabled = gate?.enabled !== false;
+                    $(button).children('.ocs-toggle-icon').toggleClass('is-on', enabled);
+                    $(button).attr({ title: enabled ? '关闭此分组' : '开启此分组', 'aria-pressed': String(enabled) });
+                });
+                for (const node of list.find('.ocs-world-entry-group[data-gate-id]').toArray()) {
+                    const gateNode = tree.nodes.get(String($(node).attr('data-gate-id')));
+                    if (!gateNode) continue;
+                    const members = descendants(gateNode);
+                    $(node).children('summary').children('small').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`);
+                }
             };
             const bulk = (members) => {
                 const icon = $('<i class="ocs-toggle-icon"></i>');
@@ -6527,8 +6694,8 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                     const value = !sync();
                     for (const entry of members) {
                         entry.rawEnabled = value;
-                        entry.enabled = value && snapshotGroupEnabledForMember(state.promptGates, 'identifiers', entry.identifier);
                     }
+                    syncSnapshotGroupMemberStates(gates, entries, 'identifiers', 'identifier');
                     snapshot.updatedAt = Date.now();
                     saveSettingsDebounced();
                     renderSections();
@@ -6536,31 +6703,72 @@ async function showSnapshotContents(snapshot, onChange = () => {}) {
                 return button;
             };
 
-            // Walked in the preset's own order, with each group's drawer placed
-            // where its first member falls. Collecting the ungrouped entries
-            // separately would hoist them above every group, so the list would
-            // stop matching what the prompt manager shows.
-            const drawers = new Map();
-            for (const entry of entries) {
+            const groupGateToggle = gate => {
+                const enabled = gate.enabled !== false;
+                const button = $('<button type="button" class="ocs-world-bulk ocs-world-gate-toggle"></button>')
+                    .attr({ 'data-gate-id': String(gate.id), title: enabled ? '关闭此分组' : '开启此分组', 'aria-label': `${enabled ? '关闭' : '开启'}分组：${gate.name || '未命名分组'}`, 'aria-pressed': String(enabled) })
+                    .append($('<i class="ocs-toggle-icon"></i>').toggleClass('is-on', enabled));
+                button.on('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    gate.enabled = gate.enabled === false;
+                    syncSnapshotGroupMemberStates(gates, entries, 'identifiers', 'identifier');
+                    refresh();
+                    snapshot.updatedAt = Date.now();
+                    saveSettingsDebounced();
+                });
+                return button;
+            };
+
+            const renderGate = (node, seen = new Set()) => {
+                if (seen.has(node)) return null;
+                const nextSeen = new Set(seen).add(node);
+                const gate = node.gate;
+                const members = descendants(node);
+                const drawer = $('<details class="ocs-world-entry-group" open></details>')
+                    .attr('data-gate-id', String(gate.id));
+                drawer.append($('<summary></summary>').append(
+                    $('<b></b>').text(gate.name || '未命名分组'),
+                    $('<small></small>').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`),
+                    groupGateToggle(gate),
+                ));
+                const groupBody = $('<div class="ocs-world-entry-group-body"></div>');
+                const children = node.entries.map(entry => ({ order: entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER, render: () => entryToggle(entry, refresh) }));
+                for (const child of node.children) {
+                    const childNode = renderGate(child, nextSeen);
+                    if (childNode) children.push({ order: firstOrder(child), render: () => childNode });
+                }
+                children.sort((a, b) => a.order - b.order).forEach(item => groupBody.append(item.render()));
+                return drawer.append(groupBody);
+            };
+
+            // Saved group switches form a real tree. Any entries without a
+            // gate keep their ordinary display grouping below the tree.
+            const topLevel = [];
+            for (const node of tree.roots) {
+                const group = renderGate(node);
+                if (group) topLevel.push({ order: firstOrder(node), render: () => group });
+            }
+            const fallbackGroups = new Map();
+            for (const entry of leftovers) {
                 const group = groupOf(entry);
                 if (!group) {
-                    list.append(entryToggle(entry, refresh));
+                    topLevel.push({ order: entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER, render: () => entryToggle(entry, refresh) });
                     continue;
                 }
-                let body = drawers.get(group);
-                if (!body) {
-                    const members = entries.filter(item => groupOf(item) === group);
-                    const counter = $('<small></small>');
-                    counters.push([counter, members]);
-                    body = $('<div class="ocs-world-entry-group-body"></div>');
-                    drawers.set(group, body);
-                    list.append($('<details class="ocs-world-entry-group"></details>').append(
-                        $('<summary></summary>').append($('<b></b>').text(group), counter, bulk(members)),
-                        body,
-                    ));
-                }
-                body.append(entryToggle(entry, refresh));
+                if (!fallbackGroups.has(group)) fallbackGroups.set(group, []);
+                fallbackGroups.get(group).push(entry);
             }
+            for (const [group, members] of fallbackGroups) {
+                const drawer = $('<details class="ocs-world-entry-group" open></details>').append(
+                    $('<summary></summary>').append($('<b></b>').text(group), $('<small></small>').text(`${members.filter(entry => entry.enabled !== false).length} / ${members.length}`), bulk(members)),
+                    $('<div class="ocs-world-entry-group-body"></div>'),
+                );
+                const groupBody = drawer.children('.ocs-world-entry-group-body');
+                for (const entry of members) groupBody.append(entryToggle(entry, refresh));
+                topLevel.push({ order: Math.min(...members.map(entry => entryOrder.get(entry) ?? Number.MAX_SAFE_INTEGER)), render: () => drawer });
+            }
+            topLevel.sort((a, b) => a.order - b.order).forEach(item => list.append(item.render()));
             refresh();
             entriesBody.append(list);
             body.append(entriesDrawer);
